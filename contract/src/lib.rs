@@ -8,8 +8,10 @@ use near_sdk::near;
 use near_sdk::store::UnorderedMap;
 use near_sdk::{env, require, AccountId};
 
+mod books;
 mod policy;
 
+use books::{log_purpose_ref_closed, log_purpose_ref_registered, PurposeRef, PurposeRefView};
 use policy::{AgentPolicy, AgentView};
 
 #[near(contract_state)]
@@ -17,6 +19,8 @@ pub struct Guard {
     owner: AccountId,
     #[allow(deprecated)]
     agents: UnorderedMap<AccountId, AgentPolicy>,
+    #[allow(deprecated)]
+    purpose_refs: UnorderedMap<String, PurposeRef>,
 }
 
 #[near]
@@ -27,6 +31,7 @@ impl Guard {
         Self {
             owner: owner_id,
             agents: UnorderedMap::new(b"agents".as_slice()),
+            purpose_refs: UnorderedMap::new(b"purpose_refs".as_slice()),
         }
     }
 
@@ -87,6 +92,56 @@ impl Guard {
             .map(|(agent_id, policy)| AgentView::new(agent_id.clone(), policy))
             .collect();
         views.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
+        views
+    }
+
+    pub fn register_purpose_ref(
+        &mut self,
+        ref_id: String,
+        vendor: String,
+        max_amount_yocto: U128,
+    ) {
+        self.assert_owner();
+        assert!(
+            !self.purpose_refs.contains_key(&ref_id),
+            "Purpose ref already registered"
+        );
+        self.purpose_refs.insert(
+            ref_id.clone(),
+            PurposeRef {
+                vendor: vendor.clone(),
+                max_amount_yocto,
+                open: true,
+            },
+        );
+        log_purpose_ref_registered(&ref_id, &vendor, max_amount_yocto);
+    }
+
+    pub fn close_purpose_ref(&mut self, ref_id: String) {
+        self.assert_owner();
+        let mut purpose_ref = self
+            .purpose_refs
+            .get(&ref_id)
+            .cloned()
+            .expect("Purpose ref not registered");
+        purpose_ref.open = false;
+        self.purpose_refs.insert(ref_id.clone(), purpose_ref);
+        log_purpose_ref_closed(&ref_id);
+    }
+
+    pub fn get_purpose_ref(&self, ref_id: String) -> Option<PurposeRefView> {
+        self.purpose_refs
+            .get(&ref_id)
+            .map(|purpose_ref| PurposeRefView::new(ref_id.clone(), purpose_ref))
+    }
+
+    pub fn list_purpose_refs(&self) -> Vec<PurposeRefView> {
+        let mut views: Vec<PurposeRefView> = self
+            .purpose_refs
+            .iter()
+            .map(|(ref_id, purpose_ref)| PurposeRefView::new(ref_id.clone(), purpose_ref))
+            .collect();
+        views.sort_by(|a, b| a.ref_id.cmp(&b.ref_id));
         views
     }
 }
