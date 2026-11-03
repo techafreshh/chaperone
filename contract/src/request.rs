@@ -7,6 +7,12 @@ use crate::books::escape_json;
 /// Stored status for a payment request that passed the active and
 /// allowance gates.
 pub(crate) const STAGED: &str = "staged";
+/// Stored status for a payment request the verifier judged consistent.
+pub(crate) const PAID: &str = "paid";
+/// Stored status for a payment request the verifier judged inconsistent.
+pub(crate) const HELD: &str = "held";
+/// Rejection reason for a held request the owner declined to release.
+pub(crate) const REASON_HOLD_REJECTED: &str = "HoldRejected";
 /// Stored status for a payment request rejected at intake.
 pub(crate) const REJECTED: &str = "rejected";
 /// Rejection reason for requests from a deactivated agent.

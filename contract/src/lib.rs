@@ -12,6 +12,7 @@ use near_sdk::{env, require, AccountId};
 mod books;
 mod policy;
 mod request;
+mod verifier;
 
 use books::{log_purpose_ref_closed, log_purpose_ref_registered, PurposeRef, PurposeRefView};
 use policy::{
@@ -19,10 +20,14 @@ use policy::{
     refresh_day, AgentPolicy, AgentView,
 };
 use request::{
-    log_request_created, log_request_rejected, PaymentOutcome, PaymentRequest,
+    log_request_created, log_request_rejected, PaymentOutcome, PaymentRequest, HELD, PAID,
     REASON_AGENT_INACTIVE, REASON_EXCEEDS_DAILY_ALLOWANCE, REASON_EXCEEDS_PER_PAYMENT_CAP,
-    REASON_EXCEEDS_PURPOSE_REF_CAP, REASON_PAYEE_NOT_ALLOWLISTED, REASON_PURPOSE_REF_CLOSED,
-    REASON_PURPOSE_REF_NOT_FOUND, REJECTED, STAGED,
+    REASON_EXCEEDS_PURPOSE_REF_CAP, REASON_HOLD_REJECTED, REASON_PAYEE_NOT_ALLOWLISTED,
+    REASON_PURPOSE_REF_CLOSED, REASON_PURPOSE_REF_NOT_FOUND, REJECTED, STAGED,
+};
+use verifier::{
+    canonical_verdict_payload, decode_signature, decode_verifier_key, log_request_held,
+    log_request_paid, log_verdict_recorded, log_verifier_set,
 };
 
 #[near(contract_state)]
@@ -36,11 +41,12 @@ pub struct Guard {
     requests: UnorderedMap<u64, PaymentRequest>,
     request_seq: u64,
     treasury_yocto: u128,
+    verifier_key: Option<Vec<u8>>,
 }
 
 /// Public read view of fleet funds: logical treasury balance, registered
-/// agent count, and the payment-request queue depth (0 until `request_payment`
-/// lands).
+/// agent count, and the approval-queue depth (held requests awaiting a
+/// human decision).
 #[near(serializers=[borsh, json])]
 #[derive(Clone, Debug, PartialEq)]
 pub struct FleetSummary {
@@ -61,6 +67,7 @@ impl Guard {
             requests: UnorderedMap::new(b"requests".as_slice()),
             request_seq: 0,
             treasury_yocto: 0,
+            verifier_key: None,
         }
     }
 
@@ -152,6 +159,31 @@ impl Guard {
         policy.payee_allowlist.retain(|p| !payees.contains(p));
         log_payees_updated(&agent_id, &policy.payee_allowlist);
         self.agents.insert(agent_id, policy);
+    }
+
+    /// Owner-only registration (or rotation) of the Ed25519 verifier key
+    /// that authorizes verdicts. `Some` base58-decodes to 32 bytes and
+    /// stores; `None` clears the key. Emits `verifier_set`.
+    pub fn set_verifier(&mut self, public_key_base58: Option<String>) {
+        self.assert_owner();
+        match public_key_base58.as_deref() {
+            Some(key) => {
+                let decoded = decode_verifier_key(key);
+                self.verifier_key = Some(decoded.to_vec());
+                log_verifier_set(Some(key));
+            }
+            None => {
+                self.verifier_key = None;
+                log_verifier_set(None);
+            }
+        }
+    }
+
+    /// Permissionless view of the registered verifier key (base58).
+    pub fn get_verifier(&self) -> Option<String> {
+        self.verifier_key
+            .as_deref()
+            .map(|key| bs58::encode(key).into_string())
     }
 
     /// Agent intake for a payment: deterministic on-chain checks run in a
@@ -290,6 +322,77 @@ impl Guard {
         }
     }
 
+    /// Permissionless verdict intake: anyone may submit, but only a verdict
+    /// carrying a valid Ed25519 signature from the registered verifier key
+    /// over the canonical payload moves a staged request — to `paid` when
+    /// consistent, to `held` when not. Emits `verdict_recorded` plus
+    /// `request_paid` or `request_held`.
+    pub fn submit_verdict(
+        &mut self,
+        request_id: u64,
+        consistent: bool,
+        signature_base58: String,
+    ) {
+        let mut record = self
+            .requests
+            .get(&request_id)
+            .cloned()
+            .expect("Request not found");
+        require!(record.status == STAGED, "Request is not staged");
+        let key = self.verifier_key.clone().expect("Verifier not registered");
+        let signature = decode_signature(&signature_base58);
+        let payload = canonical_verdict_payload(&record, consistent);
+        let key_bytes: [u8; 32] = key.try_into().expect("Invalid verifier public key");
+        require!(
+            env::ed25519_verify(&signature, &payload, &key_bytes),
+            "Invalid verdict signature"
+        );
+        if consistent {
+            record.status = PAID.to_string();
+            record.reason = None;
+            self.requests.insert(request_id, record.clone());
+            log_verdict_recorded(request_id, true);
+            log_request_paid(&record);
+        } else {
+            record.status = HELD.to_string();
+            self.requests.insert(request_id, record.clone());
+            log_verdict_recorded(request_id, false);
+            log_request_held(&record);
+        }
+    }
+
+    /// Owner-only release of a held request: pays it and clears the reason.
+    /// Emits `request_paid`.
+    pub fn approve_hold(&mut self, request_id: u64) {
+        self.assert_owner();
+        let mut record = self
+            .requests
+            .get(&request_id)
+            .cloned()
+            .expect("Request not found");
+        require!(record.status == HELD, "Request is not held");
+        record.status = PAID.to_string();
+        record.reason = None;
+        self.requests.insert(request_id, record.clone());
+        log_request_paid(&record);
+    }
+
+    /// Owner-only rejection of a held request: records it as rejected with
+    /// reason `HoldRejected`. Emits `request_rejected`.
+    pub fn reject_hold(&mut self, request_id: u64) {
+        self.assert_owner();
+        let mut record = self
+            .requests
+            .get(&request_id)
+            .cloned()
+            .expect("Request not found");
+        require!(record.status == HELD, "Request is not held");
+        record.status = REJECTED.to_string();
+        record.reason = Some(REASON_HOLD_REJECTED.to_string());
+        self.requests.insert(request_id, record.clone());
+        log_request_rejected(&record);
+    }
+
     pub fn get_request(&self, request_id: u64) -> Option<PaymentRequest> {
         self.requests.get(&request_id).cloned()
     }
@@ -346,6 +449,19 @@ impl Guard {
             .collect();
         views.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
         views
+    }
+
+    /// Permissionless view of the approval queue: held requests only,
+    /// ascending by id.
+    pub fn list_queue(&self) -> Vec<PaymentRequest> {
+        let mut queue: Vec<PaymentRequest> = self
+            .requests
+            .iter()
+            .filter(|(_, record)| record.status == HELD)
+            .map(|(_, record)| record.clone())
+            .collect();
+        queue.sort_by_key(|record| record.request_id);
+        queue
     }
 
     pub fn register_purpose_ref(
@@ -432,7 +548,7 @@ impl Guard {
         FleetSummary {
             treasury_yocto: U128::from(self.treasury_yocto),
             agent_count: self.agents.len() as u64,
-            pending_queue: 0,
+            pending_queue: self.list_queue().len() as u64,
         }
     }
 }
