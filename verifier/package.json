@@ -1,0 +1,18 @@
+{
+  "name": "chaperone-verifier",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Server-side NEAR AI attestation preflight verification (fixture-first).",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@phala/dcap-qvl": "0.7.1",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.0.0",
+    "vitest": "^3.0.0"
+  }
+}
