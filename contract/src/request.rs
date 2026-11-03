@@ -13,6 +13,16 @@ pub(crate) const REJECTED: &str = "rejected";
 pub(crate) const REASON_AGENT_INACTIVE: &str = "AgentInactive";
 /// Rejection reason for requests that would exceed the daily allowance.
 pub(crate) const REASON_EXCEEDS_DAILY_ALLOWANCE: &str = "ExceedsDailyAllowance";
+/// Rejection reason for requests above the agent's per-payment cap.
+pub(crate) const REASON_EXCEEDS_PER_PAYMENT_CAP: &str = "ExceedsPerPaymentCap";
+/// Rejection reason for requests to a payee outside the agent's allowlist.
+pub(crate) const REASON_PAYEE_NOT_ALLOWLISTED: &str = "PayeeNotAllowlisted";
+/// Rejection reason for requests citing an unregistered purpose ref.
+pub(crate) const REASON_PURPOSE_REF_NOT_FOUND: &str = "PurposeRefNotFound";
+/// Rejection reason for requests citing a closed purpose ref.
+pub(crate) const REASON_PURPOSE_REF_CLOSED: &str = "PurposeRefClosed";
+/// Rejection reason for requests above the purpose ref's max amount.
+pub(crate) const REASON_EXCEEDS_PURPOSE_REF_CAP: &str = "ExceedsPurposeRefCap";
 
 /// On-chain payment request (contract storage; doubles as the
 /// `get_request` view since the id is embedded).
@@ -96,8 +106,20 @@ mod tests {
             agent.parse().unwrap(),
             U128::from(allowance),
             U128::from(allowance),
-            vec![],
+            vec!["payee.near".parse().unwrap()],
         );
+        // Intake now enforces allowlist + purpose-ref checks, so the shared
+        // fixture provisions the refs its requests cite (idempotently, since
+        // several tests register two agents).
+        for ref_id in ["ref-1", "ref-2"] {
+            if guard.get_purpose_ref(ref_id.to_string()).is_none() {
+                guard.register_purpose_ref(
+                    ref_id.to_string(),
+                    "Vendor".to_string(),
+                    U128::from(1_000 * ONE_NEAR),
+                );
+            }
+        }
     }
 
     fn request_as(guard: &mut Guard, caller: &str, payee: &str, amount: u128) -> PaymentOutcome {
@@ -242,5 +264,288 @@ mod tests {
             "Vendor".to_string(),
         );
         assert_eq!(outcome.status, STAGED);
+    }
+
+    // ---- issue #4 acceptance vectors: agent cap 10N, allowance 50N,
+    // allowlist [good.near], ref invoice-114 cap 30N ----
+
+    const FIVE_NEAR: u128 = 5 * ONE_NEAR;
+
+    fn issue4_guard() -> Guard {
+        let mut guard = fresh_guard();
+        guard.register_agent(
+            "agent.near".parse().unwrap(),
+            U128::from(50 * ONE_NEAR),
+            U128::from(10 * ONE_NEAR),
+            vec!["good.near".parse().unwrap()],
+        );
+        guard.register_purpose_ref(
+            "invoice-114".to_string(),
+            "CoreWeave".to_string(),
+            U128::from(30 * ONE_NEAR),
+        );
+        guard
+    }
+
+    fn request_for(
+        guard: &mut Guard,
+        caller: &str,
+        payee: &str,
+        amount: u128,
+        purpose_ref: &str,
+    ) -> PaymentOutcome {
+        let context = VMContextBuilder::new()
+            .predecessor_account_id(caller.parse().unwrap())
+            .build();
+        testing_env!(context);
+        guard.request_payment(
+            payee.parse().unwrap(),
+            U128::from(amount),
+            purpose_ref.to_string(),
+            "CoreWeave".to_string(),
+        )
+    }
+
+    #[test]
+    fn wire_strings_match_acceptance_contract() {
+        assert_eq!(REJECTED, "rejected");
+        assert_eq!(REASON_EXCEEDS_PER_PAYMENT_CAP, "ExceedsPerPaymentCap");
+        assert_eq!(REASON_PAYEE_NOT_ALLOWLISTED, "PayeeNotAllowlisted");
+        assert!(
+            REASON_PURPOSE_REF_NOT_FOUND.contains("PurposeRef"),
+            "unknown-ref reason must contain PurposeRef"
+        );
+    }
+
+    #[test]
+    fn non_allowlisted_payee_yields_payee_not_allowlisted() {
+        let mut guard = issue4_guard();
+        let outcome = request_for(
+            &mut guard,
+            "agent.near",
+            "evil.near",
+            FIVE_NEAR,
+            "invoice-114",
+        );
+        assert_eq!(outcome.request_id, 0);
+        assert_eq!(outcome.status, "rejected");
+        assert_eq!(
+            outcome.reason,
+            Some(REASON_PAYEE_NOT_ALLOWLISTED.to_string())
+        );
+
+        let stored = guard
+            .get_request(outcome.request_id)
+            .expect("rejection must be recorded");
+        assert_eq!(stored.status, "rejected");
+        assert_eq!(
+            stored.reason,
+            Some(REASON_PAYEE_NOT_ALLOWLISTED.to_string())
+        );
+        assert_eq!(stored.payee.as_str(), "evil.near");
+
+        // Rejections consume no allowance.
+        let view = guard
+            .get_agent("agent.near".parse().unwrap())
+            .expect("agent must be registered");
+        assert_eq!(view.remaining_today_yocto, U128::from(50 * ONE_NEAR));
+    }
+
+    #[test]
+    fn amount_above_cap_yields_exceeds_per_payment_cap() {
+        let mut guard = issue4_guard();
+        // 400N exceeds the 10N cap, the 50N allowance, and the 30N ref cap:
+        // the cap check fires first.
+        let outcome = request_for(
+            &mut guard,
+            "agent.near",
+            "good.near",
+            400 * ONE_NEAR,
+            "invoice-114",
+        );
+        assert_eq!(outcome.status, "rejected");
+        assert_eq!(
+            outcome.reason,
+            Some(REASON_EXCEEDS_PER_PAYMENT_CAP.to_string())
+        );
+
+        let stored = guard
+            .get_request(outcome.request_id)
+            .expect("rejection must be recorded");
+        assert_eq!(stored.status, "rejected");
+        assert_eq!(
+            stored.reason,
+            Some(REASON_EXCEEDS_PER_PAYMENT_CAP.to_string())
+        );
+    }
+
+    #[test]
+    fn unknown_ref_yields_purpose_ref_reason_and_is_stored() {
+        let mut guard = issue4_guard();
+        let outcome = request_for(&mut guard, "agent.near", "good.near", FIVE_NEAR, "nope-999");
+        assert_eq!(outcome.status, "rejected");
+        let reason = outcome.reason.clone().expect("reason must be set");
+        assert!(
+            reason.contains("PurposeRef"),
+            "unknown-ref reason must contain PurposeRef, got {reason}"
+        );
+
+        let stored = guard
+            .get_request(outcome.request_id)
+            .expect("rejection must be stored retrievable by get_request");
+        assert_eq!(stored.status, "rejected");
+        assert!(
+            stored
+                .reason
+                .as_deref()
+                .unwrap_or("")
+                .contains("PurposeRef"),
+            "stored reason must contain PurposeRef"
+        );
+    }
+
+    #[test]
+    fn clean_request_stages_and_draws_allowance_until_exhausted() {
+        let mut guard = issue4_guard();
+
+        let clean = request_for(
+            &mut guard,
+            "agent.near",
+            "good.near",
+            FIVE_NEAR,
+            "invoice-114",
+        );
+        assert_eq!(clean.request_id, 0);
+        assert_eq!(clean.status, STAGED);
+        assert_eq!(clean.reason, None);
+
+        // Cap-boundary amounts stage: four more 10N requests fill the 50N
+        // allowance exactly (5 + 4*10 = 45... plus one 5N top-up = 50).
+        for _ in 0..4 {
+            let outcome = request_for(
+                &mut guard,
+                "agent.near",
+                "good.near",
+                10 * ONE_NEAR,
+                "invoice-114",
+            );
+            assert_eq!(outcome.status, STAGED);
+        }
+        let top_up = request_for(
+            &mut guard,
+            "agent.near",
+            "good.near",
+            FIVE_NEAR,
+            "invoice-114",
+        );
+        assert_eq!(top_up.status, STAGED);
+
+        // Allowance exhausted: the next yocto-scale request breaches the day.
+        let breached = request_for(
+            &mut guard,
+            "agent.near",
+            "good.near",
+            FIVE_NEAR,
+            "invoice-114",
+        );
+        assert_eq!(breached.status, REJECTED);
+        assert_eq!(
+            breached.reason,
+            Some(REASON_EXCEEDS_DAILY_ALLOWANCE.to_string())
+        );
+        let stored = guard
+            .get_request(breached.request_id)
+            .expect("rejection must be recorded");
+        assert_eq!(stored.status, REJECTED);
+    }
+
+    #[test]
+    fn closed_ref_yields_purpose_ref_closed() {
+        let mut guard = issue4_guard();
+        set_predecessor(OWNER);
+        guard.close_purpose_ref("invoice-114".to_string());
+
+        let outcome = request_for(
+            &mut guard,
+            "agent.near",
+            "good.near",
+            FIVE_NEAR,
+            "invoice-114",
+        );
+        assert_eq!(outcome.status, REJECTED);
+        assert_eq!(outcome.reason, Some(REASON_PURPOSE_REF_CLOSED.to_string()));
+        let stored = guard
+            .get_request(outcome.request_id)
+            .expect("rejection must be recorded");
+        assert_eq!(stored.status, REJECTED);
+    }
+
+    #[test]
+    fn amount_above_ref_cap_yields_exceeds_purpose_ref_cap() {
+        let mut guard = fresh_guard();
+        guard.register_agent(
+            "big.near".parse().unwrap(),
+            U128::from(200 * ONE_NEAR),
+            U128::from(100 * ONE_NEAR),
+            vec!["good.near".parse().unwrap()],
+        );
+        guard.register_purpose_ref(
+            "small-ref".to_string(),
+            "Vendor".to_string(),
+            U128::from(30 * ONE_NEAR),
+        );
+
+        // 50N fits the agent cap and allowance but exceeds the 30N ref cap.
+        let outcome = request_for(
+            &mut guard,
+            "big.near",
+            "good.near",
+            50 * ONE_NEAR,
+            "small-ref",
+        );
+        assert_eq!(outcome.status, REJECTED);
+        assert_eq!(
+            outcome.reason,
+            Some(REASON_EXCEEDS_PURPOSE_REF_CAP.to_string())
+        );
+    }
+
+    #[test]
+    fn mixed_outcome_ids_are_monotonic_from_zero() {
+        let mut guard = issue4_guard();
+
+        let evil = request_for(
+            &mut guard,
+            "agent.near",
+            "evil.near",
+            FIVE_NEAR,
+            "invoice-114",
+        );
+        assert_eq!(evil.request_id, 0);
+        assert_eq!(evil.status, REJECTED);
+
+        let over_cap = request_for(
+            &mut guard,
+            "agent.near",
+            "good.near",
+            400 * ONE_NEAR,
+            "invoice-114",
+        );
+        assert_eq!(over_cap.request_id, 1);
+        assert_eq!(over_cap.status, REJECTED);
+
+        let unknown = request_for(&mut guard, "agent.near", "good.near", FIVE_NEAR, "nope-999");
+        assert_eq!(unknown.request_id, 2);
+        assert_eq!(unknown.status, REJECTED);
+
+        let clean = request_for(
+            &mut guard,
+            "agent.near",
+            "good.near",
+            FIVE_NEAR,
+            "invoice-114",
+        );
+        assert_eq!(clean.request_id, 3);
+        assert_eq!(clean.status, STAGED);
     }
 }
