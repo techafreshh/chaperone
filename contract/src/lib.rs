@@ -11,9 +11,17 @@ use near_sdk::{env, require, AccountId};
 
 mod books;
 mod policy;
+mod request;
 
 use books::{log_purpose_ref_closed, log_purpose_ref_registered, PurposeRef, PurposeRefView};
-use policy::{AgentPolicy, AgentView};
+use policy::{
+    current_utc_day, effective_spent, log_agent_killed, log_agent_reenabled, log_payees_updated,
+    refresh_day, AgentPolicy, AgentView,
+};
+use request::{
+    log_request_created, log_request_rejected, PaymentOutcome, PaymentRequest,
+    REASON_AGENT_INACTIVE, REASON_EXCEEDS_DAILY_ALLOWANCE, REJECTED, STAGED,
+};
 
 #[near(contract_state)]
 pub struct Guard {
@@ -22,6 +30,9 @@ pub struct Guard {
     agents: UnorderedMap<AccountId, AgentPolicy>,
     #[allow(deprecated)]
     purpose_refs: UnorderedMap<String, PurposeRef>,
+    #[allow(deprecated)]
+    requests: UnorderedMap<u64, PaymentRequest>,
+    request_seq: u64,
     treasury_yocto: u128,
 }
 
@@ -45,6 +56,8 @@ impl Guard {
             owner: owner_id,
             agents: UnorderedMap::new(b"agents".as_slice()),
             purpose_refs: UnorderedMap::new(b"purpose_refs".as_slice()),
+            requests: UnorderedMap::new(b"requests".as_slice()),
+            request_seq: 0,
             treasury_yocto: 0,
         }
     }
@@ -68,6 +81,8 @@ impl Guard {
                 per_payment_cap_yocto,
                 payee_allowlist,
                 active: true,
+                spent_today_yocto: U128::from(0),
+                last_spend_day: current_utc_day(),
             },
         );
     }
@@ -91,6 +106,143 @@ impl Guard {
             policy.per_payment_cap_yocto = cap;
         }
         self.agents.insert(agent_id, policy);
+    }
+
+    pub fn set_agent_active(&mut self, agent_id: AccountId, active: bool) {
+        self.assert_owner();
+        let mut policy = self
+            .agents
+            .get(&agent_id)
+            .cloned()
+            .expect("Agent not registered");
+        policy.active = active;
+        self.agents.insert(agent_id.clone(), policy);
+        if active {
+            log_agent_reenabled(&agent_id);
+        } else {
+            log_agent_killed(&agent_id);
+        }
+    }
+
+    pub fn add_payees(&mut self, agent_id: AccountId, payees: Vec<AccountId>) {
+        self.assert_owner();
+        let mut policy = self
+            .agents
+            .get(&agent_id)
+            .cloned()
+            .expect("Agent not registered");
+        for payee in payees {
+            if !policy.payee_allowlist.contains(&payee) {
+                policy.payee_allowlist.push(payee);
+            }
+        }
+        log_payees_updated(&agent_id, &policy.payee_allowlist);
+        self.agents.insert(agent_id, policy);
+    }
+
+    pub fn remove_payees(&mut self, agent_id: AccountId, payees: Vec<AccountId>) {
+        self.assert_owner();
+        let mut policy = self
+            .agents
+            .get(&agent_id)
+            .cloned()
+            .expect("Agent not registered");
+        policy.payee_allowlist.retain(|p| !payees.contains(p));
+        log_payees_updated(&agent_id, &policy.payee_allowlist);
+        self.agents.insert(agent_id, policy);
+    }
+
+    pub fn request_payment(
+        &mut self,
+        payee: AccountId,
+        amount_yocto: U128,
+        purpose_ref: String,
+        vendor: String,
+    ) -> PaymentOutcome {
+        let agent_id = env::predecessor_account_id();
+        let mut policy = self
+            .agents
+            .get(&agent_id)
+            .cloned()
+            .expect("Agent not registered");
+        refresh_day(&mut policy);
+
+        if !policy.active {
+            let request_id = self.request_seq;
+            self.request_seq += 1;
+            let record = PaymentRequest {
+                request_id,
+                agent_id: agent_id.clone(),
+                payee,
+                amount_yocto,
+                purpose_ref,
+                vendor,
+                status: REJECTED.to_string(),
+                reason: Some(REASON_AGENT_INACTIVE.to_string()),
+            };
+            self.agents.insert(agent_id, policy);
+            self.requests.insert(request_id, record.clone());
+            log_request_rejected(&record);
+            return PaymentOutcome {
+                request_id,
+                status: REJECTED.to_string(),
+                reason: Some(REASON_AGENT_INACTIVE.to_string()),
+            };
+        }
+
+        let spent = effective_spent(&policy);
+        if !Guard::within_allowance(
+            spent.saturating_add(amount_yocto.0),
+            policy.daily_allowance_yocto.0,
+        ) {
+            let request_id = self.request_seq;
+            self.request_seq += 1;
+            let record = PaymentRequest {
+                request_id,
+                agent_id: agent_id.clone(),
+                payee,
+                amount_yocto,
+                purpose_ref,
+                vendor,
+                status: REJECTED.to_string(),
+                reason: Some(REASON_EXCEEDS_DAILY_ALLOWANCE.to_string()),
+            };
+            self.agents.insert(agent_id, policy);
+            self.requests.insert(request_id, record.clone());
+            log_request_rejected(&record);
+            return PaymentOutcome {
+                request_id,
+                status: REJECTED.to_string(),
+                reason: Some(REASON_EXCEEDS_DAILY_ALLOWANCE.to_string()),
+            };
+        }
+
+        policy.spent_today_yocto = U128::from(spent.saturating_add(amount_yocto.0));
+        policy.last_spend_day = current_utc_day();
+        self.agents.insert(agent_id.clone(), policy);
+        let request_id = self.request_seq;
+        self.request_seq += 1;
+        let record = PaymentRequest {
+            request_id,
+            agent_id,
+            payee,
+            amount_yocto,
+            purpose_ref,
+            vendor,
+            status: STAGED.to_string(),
+            reason: None,
+        };
+        self.requests.insert(request_id, record.clone());
+        log_request_created(&record);
+        PaymentOutcome {
+            request_id,
+            status: STAGED.to_string(),
+            reason: None,
+        }
+    }
+
+    pub fn get_request(&self, request_id: u64) -> Option<PaymentRequest> {
+        self.requests.get(&request_id).cloned()
     }
 
     pub fn get_agent(&self, agent_id: AccountId) -> Option<AgentView> {
