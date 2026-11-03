@@ -12,6 +12,11 @@ source: near-chaperone-brief.md + brainstorm session Nov 3 + verified NEAR AI/Ti
 
 **Competition context:** NEAR Hackathon, repo public before 2026-11-14T23:59Z, single uneditable submission, AI-screened then human-judged. Tracks: `security` (primary), `agents`, tag `privacy`. Ships standalone **only if** a human co-lead owns the submission (Techa's email is capped at 2 submissions, taken by SERVITOR + FOREMAN) — decision gate Nov 7/9. Otherwise CHAPERONE folds in as SERVITOR/FOREMAN's policy layer. This PRD assumes the standalone track (per owner decision Nov 3: "just build"), with the fold-in path preserved: everything through Phase 3 is reusable as the embedded policy layer.
 
+**Build rules (binding on every agent, and on any plan/implement/review prompt or doc derived from this file):**
+- **Q-015 (hard rule):** no agent may ever read `near-chaperone-brief.md`. This PRD is the **sole** requirement source. The Books component and all sample data must stay independent of SERVITOR/FOREMAN — no sibling-repo code, briefs, or docs, ever.
+- Lap 1 is a **walking skeleton**: the contract crate compiling with its first green unit tests, a minimal Next.js 15 app shell serving `/api/health`, and a CI workflow (`.github/workflows/ci.yml`) that runs `cargo test` for the contract and builds the app. The factory merge gate autodetects checks (`required_checks: ["*"]`).
+- Demo video, Verification-Center footage, co-lead coordination, and the final submission (§12 Phase 4) are **operator-run** — they must not become agent build issues.
+
 ---
 
 ## 1. Executive Summary
@@ -311,6 +316,8 @@ POST /attestation/preflight { model }           → { signing_address, verified:
 - [ ] README (machine-pass checklist) + attack-suite docs; mainnet dust clip
 - [ ] Freeze repo pre-submit; submit under co-lead identity (Techa listed as team member)
 - Validation: repro gate from a third-party clone; all gates green in video
+
+**Operator-run — keep off the agent backlog:** demo video · Verification-Center footage · co-lead coordination · final submission · repo freeze.
 
 ## 13. Future Considerations (post-MVP)
 

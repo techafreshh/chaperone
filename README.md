@@ -45,8 +45,8 @@ development, in the open:
 | 3 — Attack suite + kill flows + MCP | Nov 7–8 | 3 scripted on-chain blocks + 1 clean transit | planned |
 | 4 — Demo + repro + submission | Nov 9–13 | video · one-command replay · freeze | planned |
 
-Full product thinking in [`.agents/PRDs/PRD.md`](./.agents/PRDs/PRD.md); the
-original build brief is [`near-chaperone-brief.md`](./near-chaperone-brief.md).
+Full product thinking in [`.agents/PRDs/PRD.md`](./.agents/PRDs/PRD.md) — the
+single requirement source for all build work.
 
 Stack: NEAR (Rust near-sdk contract) · NEAR AI Cloud (TEE-hosted purpose model)
 · Next.js 15 + TypeScript + Tailwind · Supabase mirror · MCP server
