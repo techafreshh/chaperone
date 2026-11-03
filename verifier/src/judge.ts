@@ -1,4 +1,4 @@
-import { sha256HexText } from "./bind.js";
+import { normalizeCloudBaseUrl, sha256HexText } from "./bind.js";
 
 // Catalog-model judge: asks a TEE-hosted NEAR AI Cloud model whether a
 // staged payment request is consistent with its stated reason, over
@@ -146,12 +146,12 @@ export async function judgeModel(
     return { ok: false, reason: "model is required", model };
   }
   const fetchImpl = opts.fetchImpl ?? fetch;
-  const base = opts.baseUrl.replace(/\/+$/, "");
+  const base = normalizeCloudBaseUrl(opts.baseUrl);
   const body = { model, messages: buildJudgePrompt(opts.request) };
   const requestText = JSON.stringify(body);
   let response: Response;
   try {
-    response = await fetchImpl(`${base}/chat/completions`, {
+    response = await fetchImpl(`${base}/v1/chat/completions`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

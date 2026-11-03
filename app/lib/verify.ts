@@ -1,5 +1,9 @@
 import { NextResponse } from "next/server";
-import { createVerifyStack, type VerifyStack } from "../../verifier/src/server";
+import {
+  createNearChainAdapter,
+  createVerifyStack,
+  type VerifyStack,
+} from "../../verifier/src/server";
 import { getStatus } from "../../verifier/src/preflight";
 
 // Shared `/verify` HTTP handlers. Both the documented `/api/verify` routes
@@ -16,7 +20,17 @@ import { getStatus } from "../../verifier/src/preflight";
 let stack: VerifyStack | null = null;
 
 function getStack(): VerifyStack {
-  if (stack === null) stack = createVerifyStack();
+  if (stack !== null) return stack;
+  const contractId = process.env.GUARD_CONTRACT_ID ?? "";
+  const accountId = process.env.NEAR_ACCOUNT_ID ?? "";
+  const privateKey = process.env.NEAR_PRIVATE_KEY ?? "";
+  if (contractId !== "" && accountId !== "" && privateKey !== "") {
+    stack = createVerifyStack({
+      chain: createNearChainAdapter({ contractId, accountId, privateKey }),
+    });
+  } else {
+    stack = createVerifyStack();
+  }
   return stack;
 }
 

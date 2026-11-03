@@ -308,19 +308,20 @@ export type VerifyHandler =
 
 export interface VerifyStack {
   handle: VerifyHandler;
-  chain: InMemoryChain;
+  chain: ChainAdapter;
   keys: VerifierKeys;
   model: string;
 }
 
-// Build a matched handler + in-memory chain pair: the chain's registered
-// verifier key is derived from the same signing key the handler signs
-// with. Prefer this over hand-wiring the two separately.
+// Build a matched handler + chain pair: the chain's registered verifier key
+// is derived from the same signing key the handler signs with. An explicit
+// `chain` (in-memory fixture or live `near-api-js` adapter) is used as-is;
+// otherwise a seeded in-memory fixture store is created. Prefer this over
+// hand-wiring the two separately.
 export function createVerifyStack(opts: VerifyHandlerOptions = {}): VerifyStack {
   const keys = opts.resolvedKeys ?? resolveVerifierKeys(opts.signingKey);
-  const chain = opts.chain instanceof InMemoryChain
-    ? opts.chain
-    : new InMemoryChain({
+  const chain: ChainAdapter = opts.chain ??
+    new InMemoryChain({
       seeds: opts.seeds,
       verifierPublicKey: keys.publicKeyBytes,
     });

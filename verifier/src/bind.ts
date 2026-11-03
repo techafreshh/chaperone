@@ -13,6 +13,17 @@ export function sha256HexText(data: string): string {
   return createHash("sha256").update(data, "utf8").digest("hex");
 }
 
+// Normalize a cloud base to the service root: strip trailing slashes, then
+// a single trailing `/v1` when present, so callers can append the
+// documented `/v1/...` paths idempotently. Both the bare service root
+// (`https://cloud-api.near.ai`) and the documented base
+// (`https://cloud-api.near.ai/v1`) resolve to the same live URLs; the
+// in-repo fixture root (`http://127.0.0.1:<port>`) works unchanged.
+export function normalizeCloudBaseUrl(baseUrl: string): string {
+  const trimmed = baseUrl.replace(/\/+$/, "");
+  return trimmed.endsWith("/v1") ? trimmed.slice(0, -"/v1".length) : trimmed;
+}
+
 export interface CompletionSignature {
   text: string;
   signature: string;
@@ -45,7 +56,7 @@ export async function fetchCompletionSignature(
   const retries = opts.retries ?? 5;
   const retryDelayMs = opts.retryDelayMs ?? 1000;
   const fetchImpl = opts.fetchImpl ?? fetch;
-  const base = opts.baseUrl.replace(/\/+$/, "");
+  const base = normalizeCloudBaseUrl(opts.baseUrl);
   const url =
     `${base}/v1/signature/${encodeURIComponent(opts.chatId)}` +
     `?model=${encodeURIComponent(opts.model)}&signing_algo=ecdsa`;
