@@ -2,7 +2,6 @@ use near_sdk::json_types::U128;
 use near_sdk::near;
 use near_sdk::AccountId;
 
-use crate::books::escape_json;
 
 /// Stored status for a payment request that passed the active and
 /// allowance gates.
@@ -56,27 +55,7 @@ pub struct PaymentOutcome {
     pub reason: Option<String>,
 }
 
-pub(crate) fn log_request_created(request: &PaymentRequest) {
-    near_sdk::env::log_str(&format!(
-        "{{\"standard\":\"chaperone\",\"version\":\"1.0.0\",\"event\":\"request_created\",\"data\":{{\"request_id\":{},\"agent_id\":\"{}\",\"payee\":\"{}\",\"amount_yocto\":\"{}\",\"purpose_ref\":\"{}\",\"vendor\":\"{}\"}}}}",
-        request.request_id,
-        escape_json(request.agent_id.as_str()),
-        escape_json(request.payee.as_str()),
-        request.amount_yocto.0,
-        escape_json(&request.purpose_ref),
-        escape_json(&request.vendor)
-    ));
-}
-
-pub(crate) fn log_request_rejected(request: &PaymentRequest) {
-    let reason = request.reason.as_deref().unwrap_or("");
-    near_sdk::env::log_str(&format!(
-        "{{\"standard\":\"chaperone\",\"version\":\"1.0.0\",\"event\":\"request_rejected\",\"data\":{{\"request_id\":{},\"agent_id\":\"{}\",\"reason\":\"{}\"}}}}",
-        request.request_id,
-        escape_json(request.agent_id.as_str()),
-        escape_json(reason)
-    ));
-}
+pub(crate) use crate::events::{log_request_created, log_request_rejected};
 
 #[cfg(test)]
 mod tests {
@@ -154,7 +133,7 @@ mod tests {
         assert!(!view.active);
 
         let outcome = request_as(&mut guard, "agent-1.near", "payee.near", ONE_NEAR);
-        assert_eq!(outcome.request_id, 0);
+        assert_eq!(outcome.request_id, 1);
         assert_eq!(outcome.status, REJECTED);
         assert_eq!(outcome.reason, Some(REASON_AGENT_INACTIVE.to_string()));
 
@@ -219,7 +198,7 @@ mod tests {
     }
 
     #[test]
-    fn request_ids_are_monotonic_from_zero() {
+    fn request_ids_are_monotonic_from_one() {
         let mut guard = fresh_guard();
         register(&mut guard, "agent-1.near", 10 * ONE_NEAR);
         register(&mut guard, "agent-2.near", 10 * ONE_NEAR);
@@ -229,13 +208,13 @@ mod tests {
 
         // Rejection still allocates an id.
         let rejected = request_as(&mut guard, "agent-1.near", "payee.near", ONE_NEAR);
-        assert_eq!(rejected.request_id, 0);
+        assert_eq!(rejected.request_id, 1);
 
         let first = request_as(&mut guard, "agent-2.near", "payee.near", ONE_NEAR);
-        assert_eq!(first.request_id, 1);
+        assert_eq!(first.request_id, 2);
 
         let second = request_as(&mut guard, "agent-2.near", "payee.near", ONE_NEAR);
-        assert_eq!(second.request_id, 2);
+        assert_eq!(second.request_id, 3);
 
         assert!(guard.get_request(99).is_none());
     }
@@ -333,7 +312,7 @@ mod tests {
             FIVE_NEAR,
             "invoice-114",
         );
-        assert_eq!(outcome.request_id, 0);
+        assert_eq!(outcome.request_id, 1);
         assert_eq!(outcome.status, "rejected");
         assert_eq!(
             outcome.reason,
@@ -421,7 +400,7 @@ mod tests {
             FIVE_NEAR,
             "invoice-114",
         );
-        assert_eq!(clean.request_id, 0);
+        assert_eq!(clean.request_id, 1);
         assert_eq!(clean.status, STAGED);
         assert_eq!(clean.reason, None);
 
@@ -517,7 +496,7 @@ mod tests {
     }
 
     #[test]
-    fn mixed_outcome_ids_are_monotonic_from_zero() {
+    fn mixed_outcome_ids_are_monotonic_from_one() {
         let mut guard = issue4_guard();
 
         let evil = request_for(
@@ -527,7 +506,7 @@ mod tests {
             FIVE_NEAR,
             "invoice-114",
         );
-        assert_eq!(evil.request_id, 0);
+        assert_eq!(evil.request_id, 1);
         assert_eq!(evil.status, REJECTED);
 
         let over_cap = request_for(
@@ -537,11 +516,11 @@ mod tests {
             400 * ONE_NEAR,
             "invoice-114",
         );
-        assert_eq!(over_cap.request_id, 1);
+        assert_eq!(over_cap.request_id, 2);
         assert_eq!(over_cap.status, REJECTED);
 
         let unknown = request_for(&mut guard, "agent.near", "good.near", FIVE_NEAR, "nope-999");
-        assert_eq!(unknown.request_id, 2);
+        assert_eq!(unknown.request_id, 3);
         assert_eq!(unknown.status, REJECTED);
 
         let clean = request_for(
@@ -551,7 +530,48 @@ mod tests {
             FIVE_NEAR,
             "invoice-114",
         );
-        assert_eq!(clean.request_id, 3);
+        assert_eq!(clean.request_id, 4);
         assert_eq!(clean.status, STAGED);
+    }
+
+    #[test]
+    fn list_requests_returns_three_sequential_ids_starting_at_one() {
+        let mut guard = issue4_guard();
+        for _ in 0..3 {
+            let outcome = request_for(
+                &mut guard,
+                "agent.near",
+                "good.near",
+                FIVE_NEAR,
+                "invoice-114",
+            );
+            assert_eq!(outcome.status, STAGED);
+        }
+        let listed = guard.list_requests(0, 10);
+        assert_eq!(listed.len(), 3);
+        let ids: Vec<u64> = listed.iter().map(|r| r.request_id).collect();
+        assert_eq!(ids, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn list_requests_pagination_slices() {
+        let mut guard = issue4_guard();
+        for _ in 0..3 {
+            let outcome = request_for(
+                &mut guard,
+                "agent.near",
+                "good.near",
+                FIVE_NEAR,
+                "invoice-114",
+            );
+            assert_eq!(outcome.status, STAGED);
+        }
+        let page = guard.list_requests(1, 1);
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].request_id, 2);
+        let empty = guard.list_requests(10, 10);
+        assert!(empty.is_empty());
+        let none = guard.list_requests(0, 0);
+        assert!(none.is_empty());
     }
 }
