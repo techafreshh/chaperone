@@ -48,6 +48,7 @@ jobs:
         run: |
           node --input-type=module -e "import { Account, JsonRpcProvider, KeyPair } from 'near-api-js'"
           node scripts/seed-books.mjs --help
+          node scripts/mirror-sync.mjs --help
           node scripts/provision-agents.mjs --help
           node scripts/revoke-key.mjs --help
       - name: Run offline script tests
