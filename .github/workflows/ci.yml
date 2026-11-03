@@ -40,6 +40,16 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Install root dependencies
+        run: npm ci
+      - name: Verify root-resolved script imports
+        run: |
+          node --input-type=module -e "import { Account, JsonRpcProvider, KeyPair } from 'near-api-js'"
+          node scripts/seed-books.mjs --help
+          node scripts/provision-agents.mjs --help
+          node scripts/revoke-key.mjs --help
       - name: Run offline script tests
         run: node --test 'scripts/**/*.test.mjs'
 
