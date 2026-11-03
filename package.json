@@ -1,0 +1,14 @@
+{
+  "name": "chaperone",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Chaperone — mission control for money-handling AI agents on NEAR.",
+  "workspaces": [
+    "app"
+  ],
+  "scripts": {
+    "dev": "npm --prefix app run dev",
+    "build": "npm --prefix app run build",
+    "start": "npm --prefix app run start"
+  }
+}
