@@ -33,6 +33,16 @@ jobs:
         working-directory: app
         run: npm run build
 
+  scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Run offline script tests
+        run: node --test 'scripts/**/*.test.mjs'
+
   verifier:
     runs-on: ubuntu-latest
     steps:
