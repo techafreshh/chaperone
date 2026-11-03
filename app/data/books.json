@@ -1,0 +1,6 @@
+[
+  { "id": "invoice-114", "vendor": "CoreWeave", "cap_near": "30" },
+  { "id": "invoice-115", "vendor": "Lambda", "cap_near": "12" },
+  { "id": "order-008", "vendor": "Crusoe", "cap_near": "8" },
+  { "id": "order-009", "vendor": "Nebius", "cap_near": "5" }
+]
