@@ -1,4 +1,3 @@
-use crate::books::escape_json;
 use crate::request::PaymentRequest;
 
 /// Domain separator prefixing every signed verdict payload (PRD §10.1).
@@ -45,41 +44,9 @@ pub(crate) fn decode_signature(signature_base58: &str) -> [u8; 64] {
     decoded.try_into().expect("Invalid verdict signature")
 }
 
-pub(crate) fn log_verifier_set(public_key_base58: Option<&str>) {
-    let key = match public_key_base58 {
-        Some(key) => format!("\"{}\"", escape_json(key)),
-        None => "null".to_string(),
-    };
-    near_sdk::env::log_str(&format!(
-        "{{\"standard\":\"chaperone\",\"version\":\"1.0.0\",\"event\":\"verifier_set\",\"data\":{{\"public_key_base58\":{}}}}}",
-        key
-    ));
-}
-
-pub(crate) fn log_verdict_recorded(request_id: u64, consistent: bool) {
-    near_sdk::env::log_str(&format!(
-        "{{\"standard\":\"chaperone\",\"version\":\"1.0.0\",\"event\":\"verdict_recorded\",\"data\":{{\"request_id\":{},\"consistent\":{}}}}}",
-        request_id, consistent
-    ));
-}
-
-pub(crate) fn log_request_held(request: &PaymentRequest) {
-    near_sdk::env::log_str(&format!(
-        "{{\"standard\":\"chaperone\",\"version\":\"1.0.0\",\"event\":\"request_held\",\"data\":{{\"request_id\":{},\"agent_id\":\"{}\"}}}}",
-        request.request_id,
-        escape_json(request.agent_id.as_str())
-    ));
-}
-
-pub(crate) fn log_request_paid(request: &PaymentRequest) {
-    near_sdk::env::log_str(&format!(
-        "{{\"standard\":\"chaperone\",\"version\":\"1.0.0\",\"event\":\"request_paid\",\"data\":{{\"request_id\":{},\"agent_id\":\"{}\",\"payee\":\"{}\",\"amount_yocto\":\"{}\"}}}}",
-        request.request_id,
-        escape_json(request.agent_id.as_str()),
-        escape_json(request.payee.as_str()),
-        request.amount_yocto.0
-    ));
-}
+pub(crate) use crate::events::{
+    log_request_held, log_request_paid, log_verdict_recorded, log_verifier_set,
+};
 
 #[cfg(test)]
 mod tests {
@@ -127,7 +94,7 @@ mod tests {
         bs58::encode(key.verifying_key().to_bytes()).into_string()
     }
 
-    /// Stages three clean requests (ids 0, 1, 2) mirroring the issue's
+    /// Stages three clean requests (ids 1, 2, 3) mirroring the issue's
     /// known agent/payee/amount/ref shape, with the verifier registered.
     fn staged_guard() -> (Guard, SigningKey) {
         let mut guard = fresh_guard();
@@ -199,7 +166,7 @@ mod tests {
     #[test]
     fn verdict_byte_differs_by_consistency_only() {
         let (guard, _) = staged_guard();
-        let request = guard.get_request(0).expect("request must exist");
+        let request = guard.get_request(1).expect("request must exist");
         let yes = canonical_verdict_payload(&request, true);
         let no = canonical_verdict_payload(&request, false);
         assert_eq!(yes.len(), no.len());
@@ -261,9 +228,9 @@ mod tests {
     fn submit_consistent_verdict_pays_request_one() {
         let (mut guard, key) = staged_guard();
         set_predecessor("anyone.near");
-        let sig = sign_as(&key, &guard, 1, true);
-        guard.submit_verdict(1, true, sig);
-        let stored = guard.get_request(1).expect("request must exist");
+        let sig = sign_as(&key, &guard, 2, true);
+        guard.submit_verdict(2, true, sig);
+        let stored = guard.get_request(2).expect("request must exist");
         assert_eq!(stored.status, "paid");
         assert_eq!(stored.reason, None);
     }
@@ -272,22 +239,22 @@ mod tests {
     fn submit_inconsistent_verdict_holds_request_two_and_queues_it() {
         let (mut guard, key) = staged_guard();
         set_predecessor("anyone.near");
-        let sig = sign_as(&key, &guard, 2, false);
-        guard.submit_verdict(2, false, sig);
+        let sig = sign_as(&key, &guard, 3, false);
+        guard.submit_verdict(3, false, sig);
 
-        let stored = guard.get_request(2).expect("request must exist");
+        let stored = guard.get_request(3).expect("request must exist");
         assert_eq!(stored.status, "held");
 
         let queue = guard.list_queue();
         assert_eq!(queue.len(), 1);
-        assert_eq!(queue[0].request_id, 2);
+        assert_eq!(queue[0].request_id, 3);
 
         // Paid/staged requests never appear in the queue.
-        let paid_sig = sign_as(&key, &guard, 1, true);
-        guard.submit_verdict(1, true, paid_sig);
+        let paid_sig = sign_as(&key, &guard, 2, true);
+        guard.submit_verdict(2, true, paid_sig);
         let queue = guard.list_queue();
         assert_eq!(queue.len(), 1);
-        assert_eq!(queue[0].request_id, 2);
+        assert_eq!(queue[0].request_id, 3);
         assert_eq!(guard.fleet_summary().pending_queue, 1);
     }
 
@@ -296,10 +263,10 @@ mod tests {
         let (mut guard, key) = staged_guard();
         // A non-owner, non-agent caller posts the verdict.
         set_predecessor("stranger.near");
-        let sig = sign_as(&key, &guard, 0, true);
-        guard.submit_verdict(0, true, sig);
+        let sig = sign_as(&key, &guard, 1, true);
+        guard.submit_verdict(1, true, sig);
         assert_eq!(
-            guard.get_request(0).expect("request must exist").status,
+            guard.get_request(1).expect("request must exist").status,
             "paid"
         );
     }
@@ -308,21 +275,21 @@ mod tests {
     fn wrong_key_signature_fails_and_hold_remains() {
         let (mut guard, key) = staged_guard();
         set_predecessor("anyone.near");
-        let hold_sig = sign_as(&key, &guard, 2, false);
-        guard.submit_verdict(2, false, hold_sig);
+        let hold_sig = sign_as(&key, &guard, 3, false);
+        guard.submit_verdict(3, false, hold_sig);
         assert_eq!(
-            guard.get_request(2).expect("request must exist").status,
+            guard.get_request(3).expect("request must exist").status,
             "held"
         );
 
         // Signature from an unregistered key over the same payload.
-        let bad_sig = sign_as(&other_signing_key(), &guard, 2, false);
+        let bad_sig = sign_as(&other_signing_key(), &guard, 3, false);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            guard.submit_verdict(2, false, bad_sig);
+            guard.submit_verdict(3, false, bad_sig);
         }));
         assert!(result.is_err(), "wrong-key verdict must panic");
         assert_eq!(
-            guard.get_request(2).expect("request must exist").status,
+            guard.get_request(3).expect("request must exist").status,
             "held"
         );
         assert_eq!(guard.list_queue().len(), 1);
@@ -333,12 +300,12 @@ mod tests {
     fn tampered_amount_signature_fails() {
         let (mut guard, key) = staged_guard();
         // Sign a payload for a different amount than the stored request.
-        let mut tampered = guard.get_request(1).expect("request must exist");
+        let mut tampered = guard.get_request(2).expect("request must exist");
         tampered.amount_yocto = U128::from(6 * ONE_NEAR);
         let payload = canonical_verdict_payload(&tampered, true);
         let sig = bs58::encode(key.sign(&payload).to_bytes()).into_string();
         set_predecessor("anyone.near");
-        guard.submit_verdict(1, true, sig);
+        guard.submit_verdict(2, true, sig);
     }
 
     #[test]
@@ -364,7 +331,7 @@ mod tests {
             "CoreWeave".to_string(),
         );
         set_predecessor("anyone.near");
-        guard.submit_verdict(0, true, bs58::encode([1u8; 64]).into_string());
+        guard.submit_verdict(1, true, bs58::encode([1u8; 64]).into_string());
     }
 
     #[test]
@@ -372,10 +339,10 @@ mod tests {
     fn double_verdict_on_terminal_state_panics() {
         let (mut guard, key) = staged_guard();
         set_predecessor("anyone.near");
-        let sig = sign_as(&key, &guard, 1, true);
-        guard.submit_verdict(1, true, sig.clone());
+        let sig = sign_as(&key, &guard, 2, true);
+        guard.submit_verdict(2, true, sig.clone());
         // Second verdict on the now-paid request must fail.
-        guard.submit_verdict(1, true, sig);
+        guard.submit_verdict(2, true, sig);
     }
 
     #[test]
@@ -391,18 +358,18 @@ mod tests {
     fn approve_hold_pays_and_reject_hold_rejects() {
         let (mut guard, key) = staged_guard();
         set_predecessor("anyone.near");
-        guard.submit_verdict(1, false, sign_as(&key, &guard, 1, false));
         guard.submit_verdict(2, false, sign_as(&key, &guard, 2, false));
+        guard.submit_verdict(3, false, sign_as(&key, &guard, 3, false));
         assert_eq!(guard.list_queue().len(), 2);
 
         set_predecessor(OWNER);
-        guard.approve_hold(1);
-        let approved = guard.get_request(1).expect("request must exist");
+        guard.approve_hold(2);
+        let approved = guard.get_request(2).expect("request must exist");
         assert_eq!(approved.status, "paid");
         assert_eq!(approved.reason, None);
 
-        guard.reject_hold(2);
-        let rejected = guard.get_request(2).expect("request must exist");
+        guard.reject_hold(3);
+        let rejected = guard.get_request(3).expect("request must exist");
         assert_eq!(rejected.status, "rejected");
         assert_eq!(rejected.reason, Some("HoldRejected".to_string()));
 
@@ -415,17 +382,17 @@ mod tests {
     fn second_hold_decision_on_terminal_state_panics() {
         let (mut guard, key) = staged_guard();
         set_predecessor("anyone.near");
-        guard.submit_verdict(1, false, sign_as(&key, &guard, 1, false));
+        guard.submit_verdict(2, false, sign_as(&key, &guard, 2, false));
 
         set_predecessor(OWNER);
-        guard.approve_hold(1);
+        guard.approve_hold(2);
         let again = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            guard.approve_hold(1);
+            guard.approve_hold(2);
         }));
         assert!(again.is_err(), "approve on paid request must panic");
 
         let reject_paid = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            guard.reject_hold(1);
+            guard.reject_hold(2);
         }));
         assert!(reject_paid.is_err(), "reject on paid request must panic");
     }
@@ -434,20 +401,20 @@ mod tests {
     fn non_owner_hold_decisions_panic() {
         let (mut guard, key) = staged_guard();
         set_predecessor("anyone.near");
-        guard.submit_verdict(1, false, sign_as(&key, &guard, 1, false));
+        guard.submit_verdict(2, false, sign_as(&key, &guard, 2, false));
 
         set_predecessor("mallory.near");
         let approve = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            guard.approve_hold(1);
+            guard.approve_hold(2);
         }));
         assert!(approve.is_err(), "non-owner approve_hold must panic");
         let reject = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            guard.reject_hold(1);
+            guard.reject_hold(2);
         }));
         assert!(reject.is_err(), "non-owner reject_hold must panic");
         // Hold survives both attempts.
         assert_eq!(
-            guard.get_request(1).expect("request must exist").status,
+            guard.get_request(2).expect("request must exist").status,
             "held"
         );
     }

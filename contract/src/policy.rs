@@ -2,7 +2,6 @@ use near_sdk::json_types::U128;
 use near_sdk::near;
 use near_sdk::AccountId;
 
-use crate::books::escape_json;
 
 /// Nanoseconds in one UTC day.
 pub(crate) const NANOS_PER_DAY: u64 = 86_400_000_000_000;
@@ -77,37 +76,7 @@ pub(crate) fn refresh_day(policy: &mut AgentPolicy) {
     }
 }
 
-pub(crate) fn log_agent_killed(agent_id: &AccountId) {
-    near_sdk::env::log_str(&format!(
-        "{{\"standard\":\"chaperone\",\"version\":\"1.0.0\",\"event\":\"agent_killed\",\"data\":{{\"agent_id\":\"{}\"}}}}",
-        escape_json(agent_id.as_str())
-    ));
-}
-
-pub(crate) fn log_agent_reenabled(agent_id: &AccountId) {
-    near_sdk::env::log_str(&format!(
-        "{{\"standard\":\"chaperone\",\"version\":\"1.0.0\",\"event\":\"agent_reenabled\",\"data\":{{\"agent_id\":\"{}\"}}}}",
-        escape_json(agent_id.as_str())
-    ));
-}
-
-pub(crate) fn log_payees_updated(agent_id: &AccountId, payee_allowlist: &[AccountId]) {
-    let mut list = String::from("[");
-    for (i, payee) in payee_allowlist.iter().enumerate() {
-        if i > 0 {
-            list.push(',');
-        }
-        list.push('"');
-        list.push_str(&escape_json(payee.as_str()));
-        list.push('"');
-    }
-    list.push(']');
-    near_sdk::env::log_str(&format!(
-        "{{\"standard\":\"chaperone\",\"version\":\"1.0.0\",\"event\":\"payees_updated\",\"data\":{{\"agent_id\":\"{}\",\"payee_allowlist\":{}}}}}",
-        escape_json(agent_id.as_str()),
-        list
-    ));
-}
+pub(crate) use crate::events::{log_agent_killed, log_agent_reenabled, log_payees_updated};
 
 #[cfg(test)]
 mod tests {

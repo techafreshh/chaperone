@@ -10,11 +10,13 @@ use near_sdk::store::UnorderedMap;
 use near_sdk::{env, require, AccountId};
 
 mod books;
+mod events;
 mod policy;
 mod request;
 mod verifier;
 
 use books::{log_purpose_ref_closed, log_purpose_ref_registered, PurposeRef, PurposeRefView};
+use events::{log_agent_registered, log_funds_deposited, log_funds_withdrawn, log_policy_updated};
 use policy::{
     current_utc_day, effective_spent, log_agent_killed, log_agent_reenabled, log_payees_updated,
     refresh_day, AgentPolicy, AgentView,
@@ -65,7 +67,7 @@ impl Guard {
             agents: UnorderedMap::new(b"agents".as_slice()),
             purpose_refs: UnorderedMap::new(b"purpose_refs".as_slice()),
             requests: UnorderedMap::new(b"requests".as_slice()),
-            request_seq: 0,
+            request_seq: 1,
             treasury_yocto: 0,
             verifier_key: None,
         }
@@ -84,15 +86,21 @@ impl Guard {
             "Agent already registered"
         );
         self.agents.insert(
-            agent_id,
+            agent_id.clone(),
             AgentPolicy {
                 daily_allowance_yocto,
                 per_payment_cap_yocto,
-                payee_allowlist,
+                payee_allowlist: payee_allowlist.clone(),
                 active: true,
                 spent_today_yocto: U128::from(0),
                 last_spend_day: current_utc_day(),
             },
+        );
+        log_agent_registered(
+            &agent_id,
+            daily_allowance_yocto,
+            per_payment_cap_yocto,
+            &payee_allowlist,
         );
     }
 
@@ -114,7 +122,12 @@ impl Guard {
         if let Some(cap) = per_payment_cap_yocto {
             policy.per_payment_cap_yocto = cap;
         }
-        self.agents.insert(agent_id, policy);
+        self.agents.insert(agent_id.clone(), policy.clone());
+        log_policy_updated(
+            &agent_id,
+            policy.daily_allowance_yocto,
+            policy.per_payment_cap_yocto,
+        );
     }
 
     pub fn set_agent_active(&mut self, agent_id: AccountId, active: bool) {
@@ -191,7 +204,8 @@ impl Guard {
     /// allowlist → ref exists → ref open → ref covers amount) before any
     /// judgment step. Failures are rejected-and-recorded with a
     /// machine-readable reason; only clean requests are staged and draw
-    /// down the day's allowance. Every call consumes one `request_seq` id.
+    /// down the day's allowance. Every call consumes one `request_seq` id,
+    /// starting at 1.
     /// Unknown callers panic with `"Agent not registered"`.
     pub fn request_payment(
         &mut self,
@@ -398,7 +412,7 @@ impl Guard {
     }
 
     /// Reject-and-record helper: stores a `rejected` request under the next
-    /// `request_seq` id, emits `request_rejected`, and leaves day-spend
+    /// `request_seq` id (starting at 1), emits `request_rejected`, and leaves day-spend
     /// untouched. Persists the (possibly day-refreshed) policy.
     /// The wide signature mirrors the `PaymentRequest` fields so each
     /// check site stays a one-line call.
@@ -462,6 +476,21 @@ impl Guard {
             .collect();
         queue.sort_by_key(|record| record.request_id);
         queue
+    }
+
+    /// Permissionless paginated view of all requests, ascending by id.
+    /// Request ids start at 1. Out-of-range offsets return empty.
+    pub fn list_requests(&self, offset: u64, limit: u64) -> Vec<PaymentRequest> {
+        let mut all: Vec<PaymentRequest> = self
+            .requests
+            .iter()
+            .map(|(_, record)| record.clone())
+            .collect();
+        all.sort_by_key(|record| record.request_id);
+        all.into_iter()
+            .skip(offset as usize)
+            .take(limit as usize)
+            .collect()
     }
 
     pub fn register_purpose_ref(
@@ -551,22 +580,6 @@ impl Guard {
             pending_queue: self.list_queue().len() as u64,
         }
     }
-}
-
-fn log_funds_deposited(account: &AccountId, amount_yocto: u128) {
-    env::log_str(&format!(
-        "{{\"standard\":\"chaperone\",\"version\":\"1.0.0\",\"event\":\"funds_deposited\",\"data\":{{\"account\":\"{}\",\"amount_yocto\":\"{}\"}}}}",
-        account.as_str(),
-        amount_yocto
-    ));
-}
-
-fn log_funds_withdrawn(to: &AccountId, amount_yocto: u128) {
-    env::log_str(&format!(
-        "{{\"standard\":\"chaperone\",\"version\":\"1.0.0\",\"event\":\"funds_withdrawn\",\"data\":{{\"to\":\"{}\",\"amount_yocto\":\"{}\"}}}}",
-        to.as_str(),
-        amount_yocto
-    ));
 }
 
 impl Guard {

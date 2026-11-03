@@ -31,36 +31,10 @@ impl PurposeRefView {
     }
 }
 
-pub(crate) fn escape_json(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c => out.push(c),
-        }
-    }
-    out
-}
-
-pub(crate) fn log_purpose_ref_registered(ref_id: &str, vendor: &str, max_amount_yocto: U128) {
-    near_sdk::env::log_str(&format!(
-        "{{\"standard\":\"chaperone\",\"version\":\"1.0.0\",\"event\":\"purpose_ref_registered\",\"data\":{{\"ref_id\":\"{}\",\"vendor\":\"{}\",\"max_amount_yocto\":\"{}\"}}}}",
-        escape_json(ref_id),
-        escape_json(vendor),
-        max_amount_yocto.0
-    ));
-}
-
-pub(crate) fn log_purpose_ref_closed(ref_id: &str) {
-    near_sdk::env::log_str(&format!(
-        "{{\"standard\":\"chaperone\",\"version\":\"1.0.0\",\"event\":\"purpose_ref_closed\",\"data\":{{\"ref_id\":\"{}\"}}}}",
-        escape_json(ref_id)
-    ));
-}
+#[allow(unused_imports)]
+pub(crate) use crate::events::{
+    escape_json, log_purpose_ref_closed, log_purpose_ref_registered,
+};
 
 #[cfg(test)]
 mod tests {
