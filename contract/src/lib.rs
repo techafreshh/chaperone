@@ -1,5 +1,6 @@
 use near_sdk::json_types::U128;
 use near_sdk::near;
+use near_sdk::{NearToken, Promise};
 // UnorderedMap is mandated by the issue contract (owner-gated registry
 // with `list_agents`); the sdk deprecation in favour of IterableMap is
 // acknowledged and intentionally not followed (no migration path needed
@@ -21,6 +22,18 @@ pub struct Guard {
     agents: UnorderedMap<AccountId, AgentPolicy>,
     #[allow(deprecated)]
     purpose_refs: UnorderedMap<String, PurposeRef>,
+    treasury_yocto: u128,
+}
+
+/// Public read view of fleet funds: logical treasury balance, registered
+/// agent count, and the payment-request queue depth (0 until `request_payment`
+/// lands).
+#[near(serializers=[borsh, json])]
+#[derive(Clone, Debug, PartialEq)]
+pub struct FleetSummary {
+    pub treasury_yocto: U128,
+    pub agent_count: u64,
+    pub pending_queue: u64,
 }
 
 #[near]
@@ -32,6 +45,7 @@ impl Guard {
             owner: owner_id,
             agents: UnorderedMap::new(b"agents".as_slice()),
             purpose_refs: UnorderedMap::new(b"purpose_refs".as_slice()),
+            treasury_yocto: 0,
         }
     }
 
@@ -144,6 +158,60 @@ impl Guard {
         views.sort_by(|a, b| a.ref_id.cmp(&b.ref_id));
         views
     }
+
+    /// Anyone may attach NEAR to fund the fleet treasury. The attached
+    /// deposit is credited to the logical treasury balance.
+    #[payable]
+    pub fn deposit_fleet_funds(&mut self) {
+        let amount = env::attached_deposit().as_yoctonear();
+        self.treasury_yocto = self.treasury_yocto.saturating_add(amount);
+        log_funds_deposited(&env::predecessor_account_id(), amount);
+    }
+
+    /// Owner-only withdrawal of treasury leftovers. State is decremented
+    /// before the transfer promise is built; no callback reconciliation
+    /// (deferred per the payment-request plan).
+    pub fn withdraw_fleet_funds(&mut self, to: AccountId, amount: U128) -> Promise {
+        self.assert_owner();
+        require!(
+            amount.0 <= self.treasury_yocto,
+            "Insufficient treasury balance"
+        );
+        self.treasury_yocto -= amount.0;
+        log_funds_withdrawn(&to, amount.0);
+        Promise::new(to).transfer(NearToken::from_yoctonear(amount.0))
+    }
+
+    /// Logical treasury balance (sum of `deposit_fleet_funds` minus
+    /// `withdraw_fleet_funds`). Direct transfers bypassing
+    /// `deposit_fleet_funds` do not credit it.
+    pub fn treasury(&self) -> U128 {
+        U128::from(self.treasury_yocto)
+    }
+
+    pub fn fleet_summary(&self) -> FleetSummary {
+        FleetSummary {
+            treasury_yocto: U128::from(self.treasury_yocto),
+            agent_count: self.agents.len() as u64,
+            pending_queue: 0,
+        }
+    }
+}
+
+fn log_funds_deposited(account: &AccountId, amount_yocto: u128) {
+    env::log_str(&format!(
+        "{{\"standard\":\"chaperone\",\"version\":\"1.0.0\",\"event\":\"funds_deposited\",\"data\":{{\"account\":\"{}\",\"amount_yocto\":\"{}\"}}}}",
+        account.as_str(),
+        amount_yocto
+    ));
+}
+
+fn log_funds_withdrawn(to: &AccountId, amount_yocto: u128) {
+    env::log_str(&format!(
+        "{{\"standard\":\"chaperone\",\"version\":\"1.0.0\",\"event\":\"funds_withdrawn\",\"data\":{{\"to\":\"{}\",\"amount_yocto\":\"{}\"}}}}",
+        to.as_str(),
+        amount_yocto
+    ));
 }
 
 impl Guard {
@@ -326,5 +394,98 @@ mod tests {
         assert!(view.active);
         assert_eq!(guard.list_agents().len(), 1);
         assert!(guard.get_agent("ghost.near".parse().unwrap()).is_none());
+    }
+
+    fn deposit_as(account_id: &str, amount_yocto: u128) {
+        let context = VMContextBuilder::new()
+            .predecessor_account_id(account_id.parse().unwrap())
+            .attached_deposit(NearToken::from_yoctonear(amount_yocto))
+            .build();
+        testing_env!(context);
+    }
+
+    const FIVE_NEAR: u128 = 5_000_000_000_000_000_000_000_000;
+    const ONE_NEAR: u128 = 1_000_000_000_000_000_000_000_000;
+
+    #[test]
+    fn deposit_five_near_credits_treasury() {
+        let mut guard = fresh_guard();
+        deposit_as("anyone.near", FIVE_NEAR);
+        guard.deposit_fleet_funds();
+        assert_eq!(guard.treasury(), U128::from(FIVE_NEAR));
+        assert_eq!(
+            guard.treasury().0.to_string(),
+            "5000000000000000000000000"
+        );
+    }
+
+    #[test]
+    fn owner_withdraw_decreases_treasury_by_exact_amount() {
+        let mut guard = fresh_guard();
+        deposit_as("anyone.near", FIVE_NEAR);
+        guard.deposit_fleet_funds();
+
+        set_predecessor(OWNER);
+        let _ = guard.withdraw_fleet_funds("owner.testnet".parse().unwrap(), U128::from(ONE_NEAR));
+        assert_eq!(guard.treasury(), U128::from(FIVE_NEAR - ONE_NEAR));
+    }
+
+    #[test]
+    fn fleet_summary_reports_treasury_agents_and_empty_queue() {
+        let mut guard = fresh_guard();
+        register_alice(&mut guard);
+        guard.register_agent(
+            "bob.near".parse().unwrap(),
+            U128::from(ALLOWANCE),
+            U128::from(CAP),
+            vec![],
+        );
+        deposit_as("anyone.near", FIVE_NEAR);
+        guard.deposit_fleet_funds();
+
+        set_predecessor("anyone.near");
+        let summary = guard.fleet_summary();
+        assert_eq!(summary.treasury_yocto, U128::from(FIVE_NEAR));
+        assert_eq!(summary.agent_count, 2);
+        assert_eq!(summary.pending_queue, 0);
+    }
+
+    #[test]
+    fn non_owner_withdraw_panics() {
+        let mut guard = fresh_guard();
+        deposit_as("anyone.near", FIVE_NEAR);
+        guard.deposit_fleet_funds();
+
+        set_predecessor("mallory.near");
+        let withdraw = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = guard.withdraw_fleet_funds("mallory.near".parse().unwrap(), U128::from(ONE_NEAR));
+        }));
+        assert!(withdraw.is_err(), "non-owner withdraw_fleet_funds must panic");
+    }
+
+    #[test]
+    #[should_panic(expected = "Insufficient treasury balance")]
+    fn over_withdraw_panics() {
+        let mut guard = fresh_guard();
+        deposit_as("anyone.near", FIVE_NEAR);
+        guard.deposit_fleet_funds();
+
+        set_predecessor(OWNER);
+        let _ = guard.withdraw_fleet_funds(
+            "owner.testnet".parse().unwrap(),
+            U128::from(FIVE_NEAR + ONE_NEAR),
+        );
+    }
+
+    #[test]
+    fn deposit_and_views_readable_by_non_owner() {
+        let mut guard = fresh_guard();
+
+        deposit_as("anyone.near", FIVE_NEAR);
+        guard.deposit_fleet_funds();
+        assert_eq!(guard.treasury().0.to_string(), "5000000000000000000000000");
+        let summary = guard.fleet_summary();
+        assert_eq!(summary.agent_count, 0);
+        assert_eq!(summary.pending_queue, 0);
     }
 }
