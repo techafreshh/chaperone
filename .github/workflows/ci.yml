@@ -26,6 +26,9 @@ jobs:
       - name: Install app dependencies
         working-directory: app
         run: npm ci
+      - name: Test app
+        working-directory: app
+        run: npm test
       - name: Build app
         working-directory: app
         run: npm run build
