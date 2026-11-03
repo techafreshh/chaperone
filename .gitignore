@@ -1,0 +1,21 @@
+# build artifacts
+node_modules/
+dist/
+target/
+.next/
+out/
+
+# env & secrets
+.env
+.env.*
+*.env
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# logs
+*.log
