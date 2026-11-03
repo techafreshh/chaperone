@@ -1,0 +1,188 @@
+import { describe, expect, it, beforeEach } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { capToYocto } from "./books";
+import {
+  __resetFleetOverlayForTests,
+  formatYoctoToNear,
+  getFleetState,
+  handleAgentsPost,
+} from "./fleet";
+
+const EMPTY_ENV = {} as NodeJS.ProcessEnv;
+
+function throwingFetch(): typeof fetch {
+  return (async () => {
+    throw new Error("must not be called");
+  }) as unknown as typeof fetch;
+}
+
+beforeEach(() => {
+  __resetFleetOverlayForTests();
+});
+
+describe("formatYoctoToNear", () => {
+  it("round-trips 30 NEAR through capToYocto", () => {
+    expect(formatYoctoToNear(capToYocto("30"))).toBe("30");
+  });
+
+  it("formats fractional and treasury values exactly", () => {
+    expect(formatYoctoToNear(capToYocto("0.5"))).toBe("0.5");
+    expect(formatYoctoToNear("125000000000000000000000000")).toBe("125");
+    expect(formatYoctoToNear("20000000000000000000000000")).toBe("20");
+  });
+});
+
+describe("getFleetState merge rule", () => {
+  it("chain active:false forces frozen over an active mirror row", async () => {
+    const mirrorRows = [
+      {
+        agent_id: "agent-3",
+        allowance_yocto: "50000000000000000000000000",
+        cap_yocto: "10000000000000000000000000",
+        active: true,
+        spent_today_yocto: "0",
+        remaining_today_yocto: "50000000000000000000000000",
+      },
+    ];
+    const chainAgents = [
+      {
+        agent_id: "agent-3",
+        daily_allowance_yocto: "50000000000000000000000000",
+        per_payment_cap_yocto: "10000000000000000000000000",
+        active: false,
+        spent_today_yocto: "0",
+        remaining_today_yocto: "50000000000000000000000000",
+      },
+    ];
+    const rpcOk = (payload: unknown) => {
+      const bytes = Array.from(Buffer.from(JSON.stringify(payload), "utf8"));
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ result: { result: bytes } }),
+        text: async () => "",
+      } as unknown as Response;
+    };
+    const impl = (async (url: unknown, init?: { body?: unknown }) => {
+      if (String(url).includes("/rest/v1/agents")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => mirrorRows,
+          text: async () => JSON.stringify(mirrorRows),
+        } as unknown as Response;
+      }
+      const bodyText = typeof init?.body === "string" ? init.body : "{}";
+      const method = (JSON.parse(bodyText) as { params?: { method_name?: string } })
+        .params?.method_name;
+      if (method === "list_agents") return rpcOk(chainAgents);
+      if (method === "treasury") return rpcOk("125000000000000000000000000");
+      return {
+        ok: false,
+        status: 500,
+        json: async () => ({}),
+        text: async () => "",
+      } as unknown as Response;
+    }) as unknown as typeof fetch;
+    const env = {
+      SUPABASE_URL: "https://x.supabase.co",
+      SUPABASE_SERVICE_KEY: "service-key",
+      GUARD_CONTRACT_ID: "guard.testnet",
+      NEAR_RPC_URL: "https://rpc.testnet.near.org",
+    } as NodeJS.ProcessEnv;
+    const state = await getFleetState({ fetchImpl: impl, env });
+    expect(state.agents.find((agent) => agent.agent_id === "agent-3")?.active).toBe(
+      false,
+    );
+  });
+});
+
+describe("getFleetState stub file tier", () => {
+  it("FLEET_STUB_FILE agents overlay the fixture values", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fleet-"));
+    const file = path.join(dir, "stub.json");
+    fs.writeFileSync(
+      file,
+      JSON.stringify({
+        agents: [
+          {
+            agent_id: "agent-1",
+            allowance_yocto: capToYocto("999"),
+            cap_yocto: capToYocto("10"),
+            active: true,
+            spent_today_yocto: "0",
+            remaining_today_yocto: capToYocto("999"),
+          },
+          {
+            agent_id: "agent-2",
+            allowance_yocto: capToYocto("50"),
+            cap_yocto: capToYocto("10"),
+            active: true,
+            spent_today_yocto: "0",
+            remaining_today_yocto: capToYocto("50"),
+          },
+          {
+            agent_id: "agent-3",
+            allowance_yocto: capToYocto("50"),
+            cap_yocto: capToYocto("10"),
+            active: false,
+            spent_today_yocto: "0",
+            remaining_today_yocto: capToYocto("50"),
+          },
+          {
+            agent_id: "agent-4",
+            allowance_yocto: capToYocto("50"),
+            cap_yocto: capToYocto("10"),
+            active: true,
+            spent_today_yocto: "0",
+            remaining_today_yocto: capToYocto("50"),
+          },
+        ],
+        treasury_yocto: capToYocto("200"),
+      }),
+    );
+    const state = await getFleetState({
+      fetchImpl: throwingFetch(),
+      env: { FLEET_STUB_FILE: file } as NodeJS.ProcessEnv,
+    });
+    expect(state.agents).toHaveLength(4);
+    expect(
+      state.agents.find((agent) => agent.agent_id === "agent-1")?.allowance_yocto,
+    ).toBe(capToYocto("999"));
+    expect(state.treasuryYocto).toBe(capToYocto("200"));
+  });
+});
+
+describe("handleAgentsPost overlay round-trip", () => {
+  it("POST agent-5 returns 200 and the next getFleetState contains agent-5", async () => {
+    const res = await handleAgentsPost(
+      new Request("http://localhost/api/agents", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agent_id: "agent-5" }),
+      }),
+      { fetchImpl: throwingFetch(), env: EMPTY_ENV },
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { ok: boolean; agent_id: string };
+    expect(body.ok).toBe(true);
+    expect(body.agent_id).toBe("agent-5");
+
+    const state = await getFleetState({ fetchImpl: throwingFetch(), env: EMPTY_ENV });
+    expect(state.agents.some((agent) => agent.agent_id === "agent-5")).toBe(true);
+  });
+});
+
+describe("getFleetState disabled mirror", () => {
+  it("no creds yields fixture agents instead of throwing", async () => {
+    const state = await getFleetState({ fetchImpl: throwingFetch(), env: EMPTY_ENV });
+    expect(state.agents.map((agent) => agent.agent_id)).toEqual([
+      "agent-1",
+      "agent-2",
+      "agent-3",
+      "agent-4",
+    ]);
+  });
+});
