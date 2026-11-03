@@ -95,3 +95,74 @@ unlimited gas. Both are rejected by validation.
    `allowance` is a non-zero numeric string.
 3. After the agent is killed, `scripts/revoke-key.sh agent-1` → the key no
    longer appears in RPC `view_access_keys`.
+
+## Supabase mirror sync
+
+`scripts/mirror-sync.mjs` mirrors on-chain agents, requests, verdicts and
+audit events into Supabase PostgREST tables (migration
+`supabase/migrations/0001_chaperone_mirror.sql`). The chain stays the
+source of truth: the sync is read-only against NEAR and never
+ authoritative for payment. The app reads the mirror via
+`GET /api/requests`.
+
+Required env:
+
+```sh
+export SUPABASE_URL=https://<project>.supabase.co
+export SUPABASE_SERVICE_KEY=<service-role key>   # server-side only, never NEXT_PUBLIC_
+export NEAR_CONTRACT_ID=guard.signer.testnet      # live chain only
+```
+
+Without `SUPABASE_URL`/`SUPABASE_SERVICE_KEY` the sync reports disabled
+and exits 0 without writing a row (never silent, never fake rows):
+
+```sh
+npm run mirror:sync -- --once
+# mirror disabled: SUPABASE_URL/SUPABASE_SERVICE_KEY not configured
+```
+
+With credentials, one pass (polls every `MIRROR_POLL_MS`, default 15000,
+unless `--once`):
+
+```sh
+npm run mirror:sync -- --once
+# mirror sync complete: agents=1 requests=9 verdicts=0 audit_events=9
+```
+
+Offline runs use a stub chain with view-identical shapes instead of RPC
+(`--stub <path>` or `$MIRROR_STUB_FILE`):
+
+```json
+{
+  "agents": [{
+    "agent_id": "agent-1.signer.testnet",
+    "daily_allowance_yocto": "50000000000000000000000000",
+    "per_payment_cap_yocto": "10000000000000000000000000",
+    "payee_allowlist": ["good.near"],
+    "active": true,
+    "spent_today_yocto": "0",
+    "remaining_today_yocto": "50000000000000000000000000"
+  }],
+  "requests": [{
+    "request_id": 9,
+    "agent_id": "agent-1.signer.testnet",
+    "payee": "good.near",
+    "amount_yocto": "5000000000000000000000000",
+    "purpose_ref": "invoice-114",
+    "vendor": "CoreWeave",
+    "status": "staged",
+    "reason": null
+  }]
+}
+```
+
+(`request_id` is dense from the detected base: id 9 syncs alongside 1-8;
+a stub holding only id 9 mirrors nothing, mirroring the on-chain walk.)
+
+## Live operator checklist: mirror (post-funding)
+
+1. Apply `supabase/migrations/0001_chaperone_mirror.sql` to the project.
+2. `npm run mirror:sync -- --once` → counts line reports synced rows.
+3. Spot-check `requests` row id 9 carries the on-chain `payee`/`amount_yocto`.
+4. `GET /api/requests?limit=5` → 200 JSON array, length ≤ 5, each item
+   with `request_id`/`status`.

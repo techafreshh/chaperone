@@ -14,7 +14,16 @@
     "jsx": "preserve",
     "incremental": true,
     "plugins": [{ "name": "next" }],
-    "paths": { "@/*": ["./*"] }
+    // Let files shared from outside the app root (`../verifier`) resolve
+    // the app's own dependencies. When the mapped path misses (workspace
+    // install hoists a package to the repo root), resolution falls back
+    // to the normal node_modules walk, so both install layouts work.
+    "paths": {
+      "@/*": ["./*"],
+      "bs58": ["./node_modules/bs58"],
+      "ethers": ["./node_modules/ethers"],
+      "@phala/dcap-qvl": ["./node_modules/@phala/dcap-qvl"]
+    }
   },
   "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
   "exclude": ["node_modules"]

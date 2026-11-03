@@ -11,6 +11,7 @@
     "build": "npm --prefix app run build",
     "start": "npm --prefix app run start",
     "books:seed": "node scripts/seed-books.mjs",
+    "mirror:sync": "node scripts/mirror-sync.mjs",
     "verifier:live-smoke": "node scripts/verifier-live-smoke.mjs"
   },
   "dependencies": {
