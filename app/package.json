@@ -10,6 +10,7 @@
     "books:seed": "node ../scripts/seed-books.mjs"
   },
   "dependencies": {
+    "@phala/dcap-qvl": "0.7.1",
     "next": "15.5.28",
     "react": "19.3.1",
     "react-dom": "19.3.1"

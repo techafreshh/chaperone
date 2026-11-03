@@ -10,7 +10,8 @@
     "dev": "npm --prefix app run dev",
     "build": "npm --prefix app run build",
     "start": "npm --prefix app run start",
-    "books:seed": "node scripts/seed-books.mjs"
+    "books:seed": "node scripts/seed-books.mjs",
+    "verifier:live-smoke": "node scripts/verifier-live-smoke.mjs"
   },
   "dependencies": {
     "near-api-js": "^7.4.0"
