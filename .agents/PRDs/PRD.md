@@ -14,7 +14,7 @@ source: near-chaperone-brief.md + brainstorm session Nov 3 + verified NEAR AI/Ti
 
 **Build rules (binding on every agent, and on any plan/implement/review prompt or doc derived from this file):**
 - **Q-015 (hard rule):** no agent may ever read `near-chaperone-brief.md`. This PRD is the **sole** requirement source. The Books component and all sample data must stay independent of SERVITOR/FOREMAN — no sibling-repo code, briefs, or docs, ever.
-- Lap 1 is a **walking skeleton**: the contract crate compiling with its first green unit tests, a minimal Next.js 15 app shell serving `/api/health`, and a CI workflow (`.github/workflows/ci.yml`) that runs `cargo test` for the contract and builds the app. The factory merge gate autodetects checks (`required_checks: ["*"]`).
+- Lap 1 is a **walking skeleton**: the contract crate compiling with its first green unit tests, a minimal Next.js 15 app shell serving `/api/health`, and a CI workflow (`.github/workflows/ci.yml`) that runs `cargo test` for the contract and builds the app. The factory merge gate autodetects checks (`required_checks: ["*"]`). **`/api/health` contract: HTTP 200, body exactly the JSON `{"ok":true}`** — this shape is pinned because the verifier scenario asserts it.
 - Demo video, Verification-Center footage, co-lead coordination, and the final submission (§12 Phase 4) are **operator-run** — they must not become agent build issues.
 
 ---
