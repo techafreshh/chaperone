@@ -1,30 +1,104 @@
+use near_sdk::json_types::U128;
 use near_sdk::near;
+// UnorderedMap is mandated by the issue contract (owner-gated registry
+// with `list_agents`); the sdk deprecation in favour of IterableMap is
+// acknowledged and intentionally not followed (no migration path needed
+// pre-deploy, and the issue names UnorderedMap explicitly).
+#[allow(deprecated)]
+use near_sdk::store::UnorderedMap;
+use near_sdk::{env, require, AccountId};
 
-// Walking-skeleton guard contract. Full guard logic (agent registry,
-// verdicts, holds, kill-switch, events) lands in later laps per PRD §12.
+mod policy;
+
+use policy::{AgentPolicy, AgentView};
+
 #[near(contract_state)]
-#[derive(Debug, Default)]
 pub struct Guard {
-    spent_today: u128,
-    daily_allowance: u128,
+    owner: AccountId,
+    #[allow(deprecated)]
+    agents: UnorderedMap<AccountId, AgentPolicy>,
 }
 
 #[near]
 impl Guard {
     #[init]
-    pub fn new(daily_allowance: u128) -> Self {
+    #[allow(deprecated)]
+    pub fn new(owner_id: AccountId) -> Self {
         Self {
-            spent_today: 0,
-            daily_allowance,
+            owner: owner_id,
+            agents: UnorderedMap::new(b"agents".as_slice()),
         }
     }
 
-    pub fn daily_allowance(&self) -> u128 {
-        self.daily_allowance
+    pub fn register_agent(
+        &mut self,
+        agent_id: AccountId,
+        daily_allowance_yocto: U128,
+        per_payment_cap_yocto: U128,
+        payee_allowlist: Vec<AccountId>,
+    ) {
+        self.assert_owner();
+        assert!(
+            !self.agents.contains_key(&agent_id),
+            "Agent already registered"
+        );
+        self.agents.insert(
+            agent_id,
+            AgentPolicy {
+                daily_allowance_yocto,
+                per_payment_cap_yocto,
+                payee_allowlist,
+                active: true,
+            },
+        );
+    }
+
+    pub fn set_agent_policy(
+        &mut self,
+        agent_id: AccountId,
+        daily_allowance_yocto: Option<U128>,
+        per_payment_cap_yocto: Option<U128>,
+    ) {
+        self.assert_owner();
+        let mut policy = self
+            .agents
+            .get(&agent_id)
+            .cloned()
+            .expect("Agent not registered");
+        if let Some(allowance) = daily_allowance_yocto {
+            policy.daily_allowance_yocto = allowance;
+        }
+        if let Some(cap) = per_payment_cap_yocto {
+            policy.per_payment_cap_yocto = cap;
+        }
+        self.agents.insert(agent_id, policy);
+    }
+
+    pub fn get_agent(&self, agent_id: AccountId) -> Option<AgentView> {
+        self.agents
+            .get(&agent_id)
+            .map(|policy| AgentView::new(agent_id.clone(), policy))
+    }
+
+    pub fn list_agents(&self) -> Vec<AgentView> {
+        let mut views: Vec<AgentView> = self
+            .agents
+            .iter()
+            .map(|(agent_id, policy)| AgentView::new(agent_id.clone(), policy))
+            .collect();
+        views.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
+        views
     }
 }
 
 impl Guard {
+    fn assert_owner(&self) {
+        require!(
+            env::predecessor_account_id() == self.owner,
+            "Only contract owner may call this method"
+        );
+    }
+
     // Pure policy helper: a payment that keeps total spend within the
     // allowance is permitted. Kept free of `env` so unit tests run on
     // the host with no blockchain mock.
@@ -36,6 +110,37 @@ impl Guard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use near_sdk::test_utils::VMContextBuilder;
+    use near_sdk::testing_env;
+
+    const OWNER: &str = "owner.testnet";
+    const ALLOWANCE: u128 = 50_000_000_000_000_000_000_000_000;
+    const CAP: u128 = 10_000_000_000_000_000_000_000_000;
+
+    fn owner_id() -> AccountId {
+        OWNER.parse().unwrap()
+    }
+
+    fn set_predecessor(account_id: &str) {
+        let context = VMContextBuilder::new()
+            .predecessor_account_id(account_id.parse().unwrap())
+            .build();
+        testing_env!(context);
+    }
+
+    fn fresh_guard() -> Guard {
+        set_predecessor(OWNER);
+        Guard::new(owner_id())
+    }
+
+    fn register_alice(guard: &mut Guard) {
+        guard.register_agent(
+            "alice.near".parse().unwrap(),
+            U128::from(ALLOWANCE),
+            U128::from(CAP),
+            vec!["a.near".parse().unwrap()],
+        );
+    }
 
     #[test]
     fn allow_when_spent_within_allowance() {
@@ -51,13 +156,120 @@ mod tests {
     }
 
     #[test]
-    fn constructor_defaults_to_zero_spend() {
-        let guard = Guard::default();
-        assert_eq!(guard.spent_today, 0);
-        assert_eq!(guard.daily_allowance, 0);
-        assert!(Guard::within_allowance(
-            guard.spent_today,
-            guard.daily_allowance
-        ));
+    fn register_returns_exact_policy_and_active() {
+        let mut guard = fresh_guard();
+        register_alice(&mut guard);
+
+        let view = guard
+            .get_agent("alice.near".parse().unwrap())
+            .expect("agent must be registered");
+        assert_eq!(view.agent_id.as_str(), "alice.near");
+        assert_eq!(view.daily_allowance_yocto, U128::from(ALLOWANCE));
+        assert_eq!(view.per_payment_cap_yocto, U128::from(CAP));
+        assert_eq!(
+            view.daily_allowance_yocto.0.to_string(),
+            "50000000000000000000000000"
+        );
+        assert_eq!(
+            view.per_payment_cap_yocto.0.to_string(),
+            "10000000000000000000000000"
+        );
+        assert_eq!(
+            view.payee_allowlist,
+            vec!["a.near".parse::<AccountId>().unwrap()]
+        );
+        assert!(view.active);
+    }
+
+    #[test]
+    fn policy_update_reflects_new_cap() {
+        let mut guard = fresh_guard();
+        register_alice(&mut guard);
+
+        let new_cap: u128 = 1_000_000_000_000_000_000_000_000;
+        guard.set_agent_policy(
+            "alice.near".parse().unwrap(),
+            None,
+            Some(U128::from(new_cap)),
+        );
+
+        let view = guard
+            .get_agent("alice.near".parse().unwrap())
+            .expect("agent must be registered");
+        assert_eq!(view.per_payment_cap_yocto, U128::from(new_cap));
+        assert_eq!(view.daily_allowance_yocto, U128::from(ALLOWANCE));
+    }
+
+    #[test]
+    fn list_returns_both_agents() {
+        let mut guard = fresh_guard();
+        register_alice(&mut guard);
+        guard.register_agent(
+            "bob.near".parse().unwrap(),
+            U128::from(ALLOWANCE),
+            U128::from(CAP),
+            vec![],
+        );
+
+        let agents = guard.list_agents();
+        assert_eq!(agents.len(), 2);
+        let ids: Vec<String> = agents.iter().map(|a| a.agent_id.to_string()).collect();
+        assert!(ids.contains(&"alice.near".to_string()));
+        assert!(ids.contains(&"bob.near".to_string()));
+    }
+
+    #[test]
+    fn non_owner_write_panics() {
+        let mut guard = fresh_guard();
+        register_alice(&mut guard);
+
+        set_predecessor("mallory.near");
+        let register = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            guard.register_agent(
+                "mallory.near".parse().unwrap(),
+                U128::from(ALLOWANCE),
+                U128::from(CAP),
+                vec![],
+            );
+        }));
+        assert!(register.is_err(), "non-owner register_agent must panic");
+
+        let tune = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            guard.set_agent_policy("alice.near".parse().unwrap(), None, Some(U128::from(1)));
+        }));
+        assert!(tune.is_err(), "non-owner set_agent_policy must panic");
+    }
+
+    #[test]
+    #[should_panic(expected = "Agent already registered")]
+    fn duplicate_register_panics() {
+        let mut guard = fresh_guard();
+        register_alice(&mut guard);
+        register_alice(&mut guard);
+    }
+
+    #[test]
+    #[should_panic(expected = "Agent not registered")]
+    fn unknown_agent_policy_panics() {
+        let mut guard = fresh_guard();
+        guard.set_agent_policy(
+            "ghost.near".parse().unwrap(),
+            Some(U128::from(ALLOWANCE)),
+            None,
+        );
+    }
+
+    #[test]
+    fn views_readable_by_non_owner() {
+        let mut guard = fresh_guard();
+        register_alice(&mut guard);
+
+        set_predecessor("anyone.near");
+        let view = guard
+            .get_agent("alice.near".parse().unwrap())
+            .expect("views must be public");
+        assert!(view.active);
+        assert_eq!(guard.list_agents().len(), 1);
+        assert!(guard.get_agent("ghost.near".parse().unwrap()).is_none());
     }
 }
