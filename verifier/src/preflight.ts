@@ -61,6 +61,31 @@ export function resetLastVerified(): void {
   lastVerified = null;
 }
 
+export interface JudgeOutcomeInput {
+  verified: boolean;
+  reason?: string;
+  model: string;
+  fixture: boolean;
+  signingAddress?: string;
+}
+
+// Record a judge/bind outcome into the same badge store `GET
+// /attestation/status` reads. Fixture and test-key verdicts stay
+// `unverifiable` (honesty rule); bind/judge failures carry a non-empty
+// reason naming the failed check.
+export function recordJudgeOutcome(outcome: JudgeOutcomeInput): void {
+  storeResult(
+    {
+      verified: outcome.verified,
+      reason: outcome.reason,
+      request_nonce: "",
+      model: outcome.model,
+      fixture: outcome.fixture,
+    },
+    outcome.signingAddress,
+  );
+}
+
 function storeResult(
   result: PreflightResult,
   signingAddress?: string,
