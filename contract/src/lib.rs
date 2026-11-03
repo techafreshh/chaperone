@@ -20,7 +20,9 @@ use policy::{
 };
 use request::{
     log_request_created, log_request_rejected, PaymentOutcome, PaymentRequest,
-    REASON_AGENT_INACTIVE, REASON_EXCEEDS_DAILY_ALLOWANCE, REJECTED, STAGED,
+    REASON_AGENT_INACTIVE, REASON_EXCEEDS_DAILY_ALLOWANCE, REASON_EXCEEDS_PER_PAYMENT_CAP,
+    REASON_EXCEEDS_PURPOSE_REF_CAP, REASON_PAYEE_NOT_ALLOWLISTED, REASON_PURPOSE_REF_CLOSED,
+    REASON_PURPOSE_REF_NOT_FOUND, REJECTED, STAGED,
 };
 
 #[near(contract_state)]
@@ -152,6 +154,13 @@ impl Guard {
         self.agents.insert(agent_id, policy);
     }
 
+    /// Agent intake for a payment: deterministic on-chain checks run in a
+    /// fixed order (active → per-payment cap → daily allowance → payee
+    /// allowlist → ref exists → ref open → ref covers amount) before any
+    /// judgment step. Failures are rejected-and-recorded with a
+    /// machine-readable reason; only clean requests are staged and draw
+    /// down the day's allowance. Every call consumes one `request_seq` id.
+    /// Unknown callers panic with `"Agent not registered"`.
     pub fn request_payment(
         &mut self,
         payee: AccountId,
@@ -168,26 +177,27 @@ impl Guard {
         refresh_day(&mut policy);
 
         if !policy.active {
-            let request_id = self.request_seq;
-            self.request_seq += 1;
-            let record = PaymentRequest {
-                request_id,
-                agent_id: agent_id.clone(),
+            return self.reject(
+                agent_id,
+                policy,
                 payee,
                 amount_yocto,
                 purpose_ref,
                 vendor,
-                status: REJECTED.to_string(),
-                reason: Some(REASON_AGENT_INACTIVE.to_string()),
-            };
-            self.agents.insert(agent_id, policy);
-            self.requests.insert(request_id, record.clone());
-            log_request_rejected(&record);
-            return PaymentOutcome {
-                request_id,
-                status: REJECTED.to_string(),
-                reason: Some(REASON_AGENT_INACTIVE.to_string()),
-            };
+                REASON_AGENT_INACTIVE,
+            );
+        }
+
+        if !Guard::within_allowance(amount_yocto.0, policy.per_payment_cap_yocto.0) {
+            return self.reject(
+                agent_id,
+                policy,
+                payee,
+                amount_yocto,
+                purpose_ref,
+                vendor,
+                REASON_EXCEEDS_PER_PAYMENT_CAP,
+            );
         }
 
         let spent = effective_spent(&policy);
@@ -195,26 +205,65 @@ impl Guard {
             spent.saturating_add(amount_yocto.0),
             policy.daily_allowance_yocto.0,
         ) {
-            let request_id = self.request_seq;
-            self.request_seq += 1;
-            let record = PaymentRequest {
-                request_id,
-                agent_id: agent_id.clone(),
+            return self.reject(
+                agent_id,
+                policy,
                 payee,
                 amount_yocto,
                 purpose_ref,
                 vendor,
-                status: REJECTED.to_string(),
-                reason: Some(REASON_EXCEEDS_DAILY_ALLOWANCE.to_string()),
-            };
-            self.agents.insert(agent_id, policy);
-            self.requests.insert(request_id, record.clone());
-            log_request_rejected(&record);
-            return PaymentOutcome {
-                request_id,
-                status: REJECTED.to_string(),
-                reason: Some(REASON_EXCEEDS_DAILY_ALLOWANCE.to_string()),
-            };
+                REASON_EXCEEDS_DAILY_ALLOWANCE,
+            );
+        }
+
+        if !policy.payee_allowlist.contains(&payee) {
+            return self.reject(
+                agent_id,
+                policy,
+                payee,
+                amount_yocto,
+                purpose_ref,
+                vendor,
+                REASON_PAYEE_NOT_ALLOWLISTED,
+            );
+        }
+
+        match self.purpose_refs.get(&purpose_ref).cloned() {
+            None => {
+                return self.reject(
+                    agent_id,
+                    policy,
+                    payee,
+                    amount_yocto,
+                    purpose_ref,
+                    vendor,
+                    REASON_PURPOSE_REF_NOT_FOUND,
+                );
+            }
+            Some(purpose_ref_record) => {
+                if !purpose_ref_record.open {
+                    return self.reject(
+                        agent_id,
+                        policy,
+                        payee,
+                        amount_yocto,
+                        purpose_ref,
+                        vendor,
+                        REASON_PURPOSE_REF_CLOSED,
+                    );
+                }
+                if !Guard::within_allowance(amount_yocto.0, purpose_ref_record.max_amount_yocto.0) {
+                    return self.reject(
+                        agent_id,
+                        policy,
+                        payee,
+                        amount_yocto,
+                        purpose_ref,
+                        vendor,
+                        REASON_EXCEEDS_PURPOSE_REF_CAP,
+                    );
+                }
+            }
         }
 
         policy.spent_today_yocto = U128::from(spent.saturating_add(amount_yocto.0));
@@ -243,6 +292,44 @@ impl Guard {
 
     pub fn get_request(&self, request_id: u64) -> Option<PaymentRequest> {
         self.requests.get(&request_id).cloned()
+    }
+
+    /// Reject-and-record helper: stores a `rejected` request under the next
+    /// `request_seq` id, emits `request_rejected`, and leaves day-spend
+    /// untouched. Persists the (possibly day-refreshed) policy.
+    /// The wide signature mirrors the `PaymentRequest` fields so each
+    /// check site stays a one-line call.
+    #[allow(clippy::too_many_arguments)]
+    fn reject(
+        &mut self,
+        agent_id: AccountId,
+        policy: AgentPolicy,
+        payee: AccountId,
+        amount_yocto: U128,
+        purpose_ref: String,
+        vendor: String,
+        reason: &str,
+    ) -> PaymentOutcome {
+        let request_id = self.request_seq;
+        self.request_seq += 1;
+        let record = PaymentRequest {
+            request_id,
+            agent_id: agent_id.clone(),
+            payee,
+            amount_yocto,
+            purpose_ref,
+            vendor,
+            status: REJECTED.to_string(),
+            reason: Some(reason.to_string()),
+        };
+        self.agents.insert(agent_id, policy);
+        self.requests.insert(request_id, record.clone());
+        log_request_rejected(&record);
+        PaymentOutcome {
+            request_id,
+            status: REJECTED.to_string(),
+            reason: Some(reason.to_string()),
+        }
     }
 
     pub fn get_agent(&self, agent_id: AccountId) -> Option<AgentView> {

@@ -149,7 +149,12 @@ mod tests {
             "agent-1.near".parse().unwrap(),
             U128::from(10u128),
             U128::from(10u128),
-            vec![],
+            vec!["payee.near".parse().unwrap()],
+        );
+        guard.register_purpose_ref(
+            "ref-1".to_string(),
+            "Vendor".to_string(),
+            U128::from(10u128),
         );
 
         // Spend 5 on day 0.
