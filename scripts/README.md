@@ -8,7 +8,7 @@ v7 (`Account`, `JsonRpcProvider`, `KeyPair`, explicit function-call access keys)
 ## Prerequisites
 
 - `node` on `PATH`.
-- Root `npm install` (provides `near-api-js`). Not needed for the offline tests.
+- Root `npm ci` (provides `near-api-js`). CI installs root dependencies and smoke-checks the `near-api-js` imports before running the offline tests.
 - Testnet credentials of the signer account, which must be both the
   sub-account parent (`agent-<i>.<signer>`) and the guard owner (`register_agent`
   is owner-gated):
