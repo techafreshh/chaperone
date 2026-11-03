@@ -20,3 +20,6 @@ Thumbs.db
 
 # logs
 *.log
+
+# agent key custody (live private keys)
+scripts/.agent-keys/
