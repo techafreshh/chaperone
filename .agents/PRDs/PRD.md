@@ -16,6 +16,7 @@ source: near-chaperone-brief.md + brainstorm session Nov 3 + verified NEAR AI/Ti
 - **Q-015 (hard rule):** no agent may ever read `near-chaperone-brief.md`. This PRD is the **sole** requirement source. The Books component and all sample data must stay independent of SERVITOR/FOREMAN — no sibling-repo code, briefs, or docs, ever.
 - Lap 1 is a **walking skeleton**: the contract crate compiling with its first green unit tests, a minimal Next.js 15 app shell serving `/api/health`, and a CI workflow (`.github/workflows/ci.yml`) that runs `cargo test` for the contract and builds the app. The factory merge gate autodetects checks (`required_checks: ["*"]`). **`/api/health` contract: HTTP 200, body exactly the JSON `{"ok":true}`** — this shape is pinned because the verifier scenario asserts it.
 - Demo video, Verification-Center footage, co-lead coordination, and the final submission (§12 Phase 4) are **operator-run** — they must not become agent build issues.
+- **Fixture-first mechanics (operator decision 2026-11-03):** credential-dependent issues (#10, #11, #12, #21) merge on labeled fixture/sandbox tiers — the verifier and mirror expose explicit `fixture`/`disabled` states, the UI never renders `TEE-verified` from fixture data. Live verification against real credentials is an operator run-script step once `factoryd.env` carries the keys.
 
 ---
 
