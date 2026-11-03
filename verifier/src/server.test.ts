@@ -211,6 +211,26 @@ describe("createVerifyHandler local fixture path", () => {
     expect((await stack.handle.view(99)).status).toBe(404);
   });
 
+  it("maps a throwing chain read to 502 JSON on view", async () => {
+    const failing: ChainAdapter = {
+      async getRequest() {
+        throw new Error("live chain reads are not implemented");
+      },
+      async submitVerdict() {
+        throw new Error("unreachable");
+      },
+    };
+    const handle = createVerifyHandler({
+      chain: failing,
+      resolvedKeys: resolveVerifierKeys(),
+    });
+    const result = await handle.view(5);
+    expect(result.status).toBe(502);
+    expect(typeof (result.body as Record<string, unknown>).error).toBe(
+      "string",
+    );
+  });
+
   it("signs with VERIFIER_SIGNING_KEY when configured", async () => {
     const configured = resolveVerifierKeys();
     process.env.VERIFIER_SIGNING_KEY = Buffer.from(

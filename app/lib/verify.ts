@@ -4,7 +4,6 @@ import {
   createVerifyStack,
   type VerifyStack,
 } from "../../verifier/src/server";
-import { getStatus } from "../../verifier/src/preflight";
 
 // Shared `/verify` HTTP handlers. Both the documented `/api/verify` routes
 // and the issue-contract `/verify` aliases delegate here so the two
@@ -66,8 +65,4 @@ export async function handleVerifyGet(
     raw === null ? undefined : Number(raw),
   );
   return NextResponse.json(result.body, { status: result.status });
-}
-
-export function handleVerifyStatusGet(): NextResponse {
-  return NextResponse.json(getStatus());
 }

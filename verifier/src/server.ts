@@ -623,7 +623,18 @@ export function createVerifyHandler(
         body: { error: "request_id must be a positive integer" },
       };
     }
-    const record = await chain.getRequest(requestId);
+    let record: PaymentRequestShape | null;
+    try {
+      record = await chain.getRequest(requestId);
+    } catch (error) {
+      return {
+        status: 502,
+        body: {
+          error: `chain lookup failed: ${error instanceof Error ? error.message : String(error)}`,
+          request_id: requestId,
+        },
+      };
+    }
     if (record === null) {
       return {
         status: 404,
@@ -656,6 +667,38 @@ async function loadNearApi(): Promise<unknown> {
   }
 }
 
+// Normalize a `get_request` view result into the handler's request shape.
+// The contract stores `amount_yocto` as `U128` (JSON string); accept a
+// plain number defensively so both encodings map to the canonical string.
+function normalizeViewRequest(value: unknown): PaymentRequestShape | null {
+  if (typeof value !== "object" || value === null) return null;
+  const record = value as Record<string, unknown>;
+  const requestId = Number(record.request_id);
+  if (!Number.isInteger(requestId) || requestId <= 0) return null;
+  if (typeof record.status !== "string") return null;
+  const amountRaw = record.amount_yocto;
+  const amountYocto = typeof amountRaw === "string"
+    ? amountRaw
+    : typeof amountRaw === "number" &&
+        Number.isInteger(amountRaw) &&
+        amountRaw >= 0
+    ? String(amountRaw)
+    : null;
+  if (amountYocto === null || !/^\d+$/.test(amountYocto)) return null;
+  return {
+    request_id: requestId,
+    agent_id: typeof record.agent_id === "string" ? record.agent_id : "",
+    payee: typeof record.payee === "string" ? record.payee : "",
+    amount_yocto: amountYocto,
+    purpose_ref: typeof record.purpose_ref === "string"
+      ? record.purpose_ref
+      : "",
+    vendor: typeof record.vendor === "string" ? record.vendor : "",
+    status: record.status,
+    reason: typeof record.reason === "string" ? record.reason : null,
+  };
+}
+
 export interface NearChainOptions {
   contractId: string;
   accountId: string;
@@ -674,13 +717,55 @@ export function createNearChainAdapter(
   const nodeUrl = opts.nodeUrl ?? process.env.NEAR_NODE_URL ?? "";
   return {
     async getRequest(requestId: number): Promise<PaymentRequestShape | null> {
-      const near = (await loadNearApi()) as Record<string, never>;
-      void near;
-      void networkId;
-      void nodeUrl;
-      throw new Error(
-        "live chain reads are not implemented: seed request state via the fixture store",
+      const mod = (await loadNearApi()) as {
+        connect: (config: unknown) => Promise<{
+          account: (id: string) => Promise<{
+            viewFunction: (args: unknown) => Promise<unknown>;
+          }>;
+        }>;
+        keyStores: { InMemoryKeyStore: new () => { setKey(n: string, a: string, k: unknown): Promise<void> } };
+        KeyPair: { fromString(s: string): unknown };
+      };
+      const keyStore = new mod.keyStores.InMemoryKeyStore();
+      await keyStore.setKey(
+        networkId,
+        opts.accountId,
+        mod.KeyPair.fromString(opts.privateKey),
       );
+      const near = await mod.connect({
+        networkId,
+        nodeUrl: nodeUrl !== "" ? nodeUrl : undefined,
+        keyStore,
+        ...(opts.fetchImpl !== undefined ? { fetch: opts.fetchImpl } : {}),
+      });
+      const account = await near.account(opts.accountId);
+      // Object-form `viewFunction` matches the `functionCall` shape used
+      // by `submitVerdict` below (near-api-js v2+); fall back to the legacy
+      // positional form if the adapter exposes it instead.
+      let result: unknown;
+      try {
+        result = await account.viewFunction({
+          contractId: opts.contractId,
+          methodName: "get_request",
+          args: { request_id: requestId },
+        });
+      } catch (error) {
+        const legacy = (account as unknown as {
+          viewFunction?: unknown;
+        }).viewFunction;
+        if (typeof legacy === "function" && (legacy as { length?: number }).length === 3) {
+          result = await (legacy as (c: string, m: string, a: unknown) => Promise<unknown>).call(
+            account,
+            opts.contractId,
+            "get_request",
+            { request_id: requestId },
+          );
+        } else {
+          throw error;
+        }
+      }
+      if (result === null || result === undefined) return null;
+      return normalizeViewRequest(result);
     },
     async submitVerdict(
       requestId: number,
