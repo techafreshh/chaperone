@@ -4,6 +4,7 @@ dist/
 target/
 .next/
 out/
+next-env.d.ts
 
 # env & secrets
 .env
