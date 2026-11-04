@@ -21,9 +21,6 @@ import {
   parseDeployArgs,
 } from "./lib/deploy-plan.mjs";
 
-const TERA_GAS = 10n ** 12n;
-const CALL_GAS = 30n * TERA_GAS;
-
 function scriptDir() {
   return dirname(fileURLToPath(import.meta.url));
 }

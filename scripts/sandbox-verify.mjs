@@ -259,7 +259,7 @@ async function main() {
 
     // Function-call-key revoke round trip on agent-2 (still active):
     // add a guard-scoped key, assert the lock shape, delete it, assert gone.
-    const { functionCallAccessKey } = nearApi;
+    // Add a guard-scoped key, assert the lock shape, delete it, assert gone.
     const scopedPair = KeyPair.fromRandom("ed25519");
     const scopedPub = scopedPair.getPublicKey().toString();
     await agent2
