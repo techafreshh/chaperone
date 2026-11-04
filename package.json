@@ -12,10 +12,17 @@
     "start": "npm --prefix app run start",
     "books:seed": "node scripts/seed-books.mjs",
     "mirror:sync": "node scripts/mirror-sync.mjs",
-    "verifier:live-smoke": "node scripts/verifier-live-smoke.mjs"
+    "verifier:live-smoke": "node scripts/verifier-live-smoke.mjs",
+    "deploy:testnet": "scripts/deploy-testnet.sh",
+    "fund:testnet": "scripts/fund-testnet.sh",
+    "sandbox:verify": "node scripts/sandbox-verify.mjs",
+    "attack": "scripts/attack-suite.sh"
   },
   "dependencies": {
     "bs58": "^6.0.0",
     "near-api-js": "^7.4.0"
+  },
+  "devDependencies": {
+    "near-workspaces": "^5.0.0"
   }
 }
