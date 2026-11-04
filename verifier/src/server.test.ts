@@ -9,11 +9,15 @@ import {
 } from "./preflight.js";
 import {
   buildVerdictPayload,
+  createNearChainAdapter,
   createVerifyHandler,
   createVerifyStack,
   InMemoryChain,
+  resolveNearRpcUrl,
   resolveVerifierKeys,
+  SUBMIT_VERDICT_GAS,
   type ChainAdapter,
+  type NearApiModuleShape,
   type VerifyStack,
 } from "./server.js";
 
@@ -337,6 +341,195 @@ describe("createVerifyHandler HTTP path via fixture cloud", () => {
     expect(String(result.body.error)).toMatch(/does not match/);
     expect(submissions).toHaveLength(0);
     expect((await inner.getRequest(5))?.status).toBe("staged");
+  });
+});
+
+describe("createNearChainAdapter live adapter (v7)", () => {
+  const RPC_ENV_KEYS = ["NEAR_RPC_URL", "NEAR_NODE_URL", "NEAR_NETWORK"] as const;
+  let savedRpc: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    savedRpc = {};
+    for (const key of RPC_ENV_KEYS) {
+      savedRpc[key] = process.env[key];
+      delete process.env[key];
+    }
+  });
+
+  afterEach(() => {
+    for (const key of RPC_ENV_KEYS) {
+      if (savedRpc[key] === undefined) delete process.env[key];
+      else process.env[key] = savedRpc[key] as string;
+    }
+  });
+
+  const STAGED_ROW = {
+    request_id: 5,
+    agent_id: "agent.near",
+    payee: "payee.near",
+    amount_yocto: FIVE_NEAR,
+    purpose_ref: "invoice-114",
+    vendor: "CoreWeave",
+    status: "staged",
+    reason: null,
+  };
+
+  interface FakeSeen {
+    urls: string[];
+    queries: Array<Record<string, unknown>>;
+    fromStrings: string[];
+    accountIds: string[];
+    calls: Array<{
+      contractId: string;
+      methodName: string;
+      args: Record<string, unknown>;
+      gas: bigint;
+    }>;
+  }
+
+  function makeFakeSeen(): FakeSeen {
+    return { urls: [], queries: [], fromStrings: [], accountIds: [], calls: [] };
+  }
+
+  // Injected fake v7 module: records every constructor/call argument so
+  // tests assert the exact SDK shape without touching the network
+  // (counting-wrapper style, mirroring the `spyAdapter` above).
+  function makeFakeNearApi(seen: FakeSeen, viewBody: string): NearApiModuleShape {
+    const fake = {
+      JsonRpcProvider: class {
+        constructor(args: { url: string }) {
+          seen.urls.push(args.url);
+        }
+        async query(args: Record<string, unknown>) {
+          seen.queries.push(args);
+          return { result: Buffer.from(viewBody, "utf8") };
+        }
+      },
+      Account: class {
+        constructor(accountId: string, _provider: unknown, _keyPair: unknown) {
+          seen.accountIds.push(accountId);
+        }
+        async callFunction(args: {
+          contractId: string;
+          methodName: string;
+          args: Record<string, unknown>;
+          gas: bigint;
+        }) {
+          seen.calls.push(args);
+          return {};
+        }
+      },
+      KeyPair: {
+        fromString(secretKey: string) {
+          seen.fromStrings.push(secretKey);
+          return { secretKey };
+        },
+      },
+    };
+    return fake as unknown as NearApiModuleShape;
+  }
+
+  function baseOpts(seen: FakeSeen, viewBody: string) {
+    return {
+      contractId: "guard.testnet",
+      accountId: "signer.testnet",
+      privateKey: "ed25519:fake",
+      nearApi: makeFakeNearApi(seen, viewBody),
+    };
+  }
+
+  it("maps a staged view row to the handler shape via provider.query", async () => {
+    const seen = makeFakeSeen();
+    const adapter = createNearChainAdapter(baseOpts(seen, JSON.stringify(STAGED_ROW)));
+    const record = await adapter.getRequest(5);
+    expect(record).toMatchObject({ ...STAGED_ROW });
+    expect(seen.queries).toHaveLength(1);
+    const query = seen.queries[0] as Record<string, unknown>;
+    expect(query).toMatchObject({
+      request_type: "call_function",
+      account_id: "guard.testnet",
+      method_name: "get_request",
+      finality: "final",
+    });
+    expect(JSON.parse(Buffer.from(query.args_base64 as string, "base64").toString())).toEqual({
+      request_id: 5,
+    });
+  });
+
+  it("returns null on a nullish view result", async () => {
+    const seen = makeFakeSeen();
+    const adapter = createNearChainAdapter(baseOpts(seen, "null"));
+    expect(await adapter.getRequest(5)).toBeNull();
+  });
+
+  it("returns null on a malformed view row", async () => {
+    const seen = makeFakeSeen();
+    const adapter = createNearChainAdapter(
+      baseOpts(seen, JSON.stringify({ ...STAGED_ROW, request_id: "bad" })),
+    );
+    expect(await adapter.getRequest(5)).toBeNull();
+  });
+
+  it("forwards submit_verdict args plus 30 TGas and returns paid/held", async () => {
+    const seen = makeFakeSeen();
+    const adapter = createNearChainAdapter(baseOpts(seen, JSON.stringify(STAGED_ROW)));
+    expect(await adapter.submitVerdict(5, true, "sig58")).toEqual({ status: "paid" });
+    expect(await adapter.submitVerdict(5, false, "sig58")).toEqual({ status: "held" });
+    expect(seen.calls).toHaveLength(2);
+    expect(seen.calls[0]).toMatchObject({
+      contractId: "guard.testnet",
+      methodName: "submit_verdict",
+      args: { request_id: 5, consistent: true, signature_base58: "sig58" },
+    });
+    expect(seen.calls[0]?.gas).toBe(SUBMIT_VERDICT_GAS);
+    expect(seen.calls[0]?.gas).toBe(BigInt(30) * BigInt(10) ** BigInt(12));
+    expect(seen.calls[1]?.args).toMatchObject({ request_id: 5, consistent: false });
+    expect(seen.fromStrings).toEqual(["ed25519:fake", "ed25519:fake"]);
+    expect(seen.accountIds).toEqual(["signer.testnet", "signer.testnet"]);
+  });
+
+  it("throws live chain unavailable for the old connect-shape module", async () => {
+    const legacy = {
+      connect: async () => ({}),
+      KeyPair: { fromString: (_key: string) => ({}) },
+    };
+    const adapter = createNearChainAdapter({
+      contractId: "guard.testnet",
+      accountId: "signer.testnet",
+      privateKey: "ed25519:fake",
+      nearApi: legacy as unknown as NearApiModuleShape,
+    });
+    await expect(adapter.getRequest(5)).rejects.toThrow(/live chain unavailable/);
+    await expect(adapter.submitVerdict(5, true, "sig58")).rejects.toThrow(
+      /live chain unavailable/,
+    );
+  });
+
+  it("resolves the RPC URL with opts > NEAR_RPC_URL > NEAR_NODE_URL > default", async () => {
+    expect(resolveNearRpcUrl({ nodeUrl: "https://opts.example" })).toBe(
+      "https://opts.example",
+    );
+    process.env.NEAR_RPC_URL = "https://rpc.env.example";
+    process.env.NEAR_NODE_URL = "https://node.env.example";
+    expect(resolveNearRpcUrl({ nodeUrl: "https://opts.example" })).toBe(
+      "https://opts.example",
+    );
+    expect(resolveNearRpcUrl()).toBe("https://rpc.env.example");
+    delete process.env.NEAR_RPC_URL;
+    expect(resolveNearRpcUrl()).toBe("https://node.env.example");
+    delete process.env.NEAR_NODE_URL;
+    expect(resolveNearRpcUrl()).toBe("https://rpc.testnet.near.org");
+    expect(resolveNearRpcUrl({ networkId: "mainnet" })).toBe(
+      "https://rpc.mainnet.near.org",
+    );
+  });
+
+  it("passes the resolved RPC URL to the provider", async () => {
+    const seen = makeFakeSeen();
+    process.env.NEAR_RPC_URL = "https://rpc.env.example";
+    const adapter = createNearChainAdapter(baseOpts(seen, "null"));
+    await adapter.getRequest(5);
+    expect(seen.urls).toEqual(["https://rpc.env.example"]);
   });
 });
 
