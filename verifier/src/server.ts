@@ -699,102 +699,137 @@ function normalizeViewRequest(value: unknown): PaymentRequestShape | null {
   };
 }
 
+// v7 `near-api-js` module shape the live adapter drives (unsigned reads
+// via `JsonRpcProvider.query`, signed writes via `KeyPairSigner` plus
+// `Account.callFunction`). Mirrors the already-fixed live write path in
+// `mcp/src/tools.ts` (`KeyPairSigner.fromSecretKey`) and the
+// unsigned-read shape in `scripts/attack-suite.mjs`.
+export interface NearApiModuleShape {
+  JsonRpcProvider: new (args: { url: string }) => {
+    query(args: Record<string, unknown>): Promise<{ result: Uint8Array }>;
+  };
+  Account: new (
+    accountId: string,
+    provider: unknown,
+    signer: unknown,
+  ) => {
+    callFunction(args: {
+      contractId: string;
+      methodName: string;
+      args: Record<string, unknown>;
+      gas: bigint;
+    }): Promise<unknown>;
+  };
+  KeyPairSigner: { fromSecretKey(secretKey: string): unknown };
+}
+
+// Gas attached to `submit_verdict`: 30 TGas, matching every script write
+// path in this repo (e.g. `CALL_GAS` in `scripts/attack-suite.mjs`).
+// Written without BigInt literals: this module is also type-checked by
+// the app's ES2017 `next build`, which rejects the `30n` literal form.
+export const SUBMIT_VERDICT_GAS = BigInt(30) * BigInt(10) ** BigInt(12);
+
+// Resolve the RPC endpoint: explicit `nodeUrl` first, then `NEAR_RPC_URL`,
+// then the legacy `NEAR_NODE_URL`, else the network default. `networkId`
+// is retained only to pick that default.
+export function resolveNearRpcUrl(
+  opts: { nodeUrl?: string; networkId?: string } = {},
+): string {
+  if (opts.nodeUrl !== undefined && opts.nodeUrl !== "") return opts.nodeUrl;
+  const envRpc = process.env.NEAR_RPC_URL;
+  if (envRpc !== undefined && envRpc !== "") return envRpc;
+  const envNode = process.env.NEAR_NODE_URL;
+  if (envNode !== undefined && envNode !== "") return envNode;
+  const network = opts.networkId ?? process.env.NEAR_NETWORK ?? "testnet";
+  return network === "mainnet"
+    ? "https://rpc.mainnet.near.org"
+    : "https://rpc.testnet.near.org";
+}
+
+// Assert the loaded module exposes the v7 surface; the removed pre-v7
+// `connect`/`keyStores` shape fails here with the `live chain
+// unavailable` error instead of a bare `TypeError` downstream.
+function requireNearApi(mod: unknown): NearApiModuleShape {
+  const shape = mod as Partial<NearApiModuleShape> | null | undefined;
+  if (
+    shape === null ||
+    shape === undefined ||
+    typeof shape.JsonRpcProvider !== "function" ||
+    typeof shape.Account !== "function" ||
+    shape.KeyPairSigner === undefined ||
+    shape.KeyPairSigner === null ||
+    typeof (shape.KeyPairSigner as { fromSecretKey?: unknown })
+      .fromSecretKey !== "function"
+  ) {
+    throw new Error(
+      "live chain unavailable: near-api-js module lacks the v7 JsonRpcProvider/Account/KeyPairSigner surface",
+    );
+  }
+  return shape as NearApiModuleShape;
+}
+
 export interface NearChainOptions {
   contractId: string;
   accountId: string;
   privateKey: string;
   networkId?: string;
   nodeUrl?: string;
+  // Legacy seam kept for signature compatibility: v7 `JsonRpcProvider`
+  // exposes no `fetch` hook, so the SDK provider uses global fetch.
   fetchImpl?: typeof fetch;
+  // Injected-module seam for tests: a fake v7 `near-api-js` shape so unit
+  // tests never touch the network. Defaults to the lazy dynamic import.
+  nearApi?: NearApiModuleShape;
 }
 
-// Live chain adapter: `submit_verdict` through `near-api-js`, selected when
-// the contract env is set. Never constructed in the fixture/test path.
+// Live chain adapter on the `near-api-js` v7 surface: unsigned
+// `provider.query` reads plus `Account.callFunction` writes (selected
+// when the contract env is set). Never constructed in the fixture/test
+// path.
 export function createNearChainAdapter(
   opts: NearChainOptions,
 ): ChainAdapter {
   const networkId = opts.networkId ?? process.env.NEAR_NETWORK ?? "testnet";
-  const nodeUrl = opts.nodeUrl ?? process.env.NEAR_NODE_URL ?? "";
+  async function loadModule(): Promise<NearApiModuleShape> {
+    if (opts.nearApi !== undefined) return requireNearApi(opts.nearApi);
+    return requireNearApi(await loadNearApi());
+  }
   return {
     async getRequest(requestId: number): Promise<PaymentRequestShape | null> {
-      const mod = (await loadNearApi()) as {
-        connect: (config: unknown) => Promise<{
-          account: (id: string) => Promise<{
-            viewFunction: (args: unknown) => Promise<unknown>;
-          }>;
-        }>;
-        keyStores: { InMemoryKeyStore: new () => { setKey(n: string, a: string, k: unknown): Promise<void> } };
-        KeyPair: { fromString(s: string): unknown };
-      };
-      const keyStore = new mod.keyStores.InMemoryKeyStore();
-      await keyStore.setKey(
-        networkId,
-        opts.accountId,
-        mod.KeyPair.fromString(opts.privateKey),
-      );
-      const near = await mod.connect({
-        networkId,
-        nodeUrl: nodeUrl !== "" ? nodeUrl : undefined,
-        keyStore,
-        ...(opts.fetchImpl !== undefined ? { fetch: opts.fetchImpl } : {}),
+      const mod = await loadModule();
+      const provider = new mod.JsonRpcProvider({
+        url: resolveNearRpcUrl({ nodeUrl: opts.nodeUrl, networkId }),
       });
-      const account = await near.account(opts.accountId);
-      // Object-form `viewFunction` matches the `functionCall` shape used
-      // by `submitVerdict` below (near-api-js v2+); fall back to the legacy
-      // positional form if the adapter exposes it instead.
-      let result: unknown;
-      try {
-        result = await account.viewFunction({
-          contractId: opts.contractId,
-          methodName: "get_request",
-          args: { request_id: requestId },
-        });
-      } catch (error) {
-        const legacy = (account as unknown as {
-          viewFunction?: unknown;
-        }).viewFunction;
-        if (typeof legacy === "function" && (legacy as { length?: number }).length === 3) {
-          result = await (legacy as (c: string, m: string, a: unknown) => Promise<unknown>).call(
-            account,
-            opts.contractId,
-            "get_request",
-            { request_id: requestId },
-          );
-        } else {
-          throw error;
-        }
-      }
-      if (result === null || result === undefined) return null;
-      return normalizeViewRequest(result);
+      const res = await provider.query({
+        request_type: "call_function",
+        account_id: opts.contractId,
+        method_name: "get_request",
+        args_base64: Buffer.from(
+          JSON.stringify({ request_id: requestId }),
+        ).toString("base64"),
+        finality: "final",
+      });
+      const raw = Buffer.from(res.result).toString();
+      const parsed: unknown = raw === "" ? null : JSON.parse(raw);
+      if (parsed === null || parsed === undefined) return null;
+      return normalizeViewRequest(parsed);
     },
     async submitVerdict(
       requestId: number,
       consistent: boolean,
       signatureBase58: string,
     ): Promise<{ status: string }> {
-      const mod = (await loadNearApi()) as {
-        connect: (config: unknown) => Promise<{
-          account: (id: string) => Promise<{
-            functionCall: (args: unknown) => Promise<unknown>;
-          }>;
-        }>;
-        keyStores: { InMemoryKeyStore: new () => { setKey(n: string, a: string, k: unknown): Promise<void> } };
-        KeyPair: { fromString(s: string): unknown };
-      };
-      const keyStore = new mod.keyStores.InMemoryKeyStore();
-      await keyStore.setKey(
-        networkId,
-        opts.accountId,
-        mod.KeyPair.fromString(opts.privateKey),
-      );
-      const near = await mod.connect({
-        networkId,
-        nodeUrl: nodeUrl !== "" ? nodeUrl : undefined,
-        keyStore,
-        ...(opts.fetchImpl !== undefined ? { fetch: opts.fetchImpl } : {}),
+      const mod = await loadModule();
+      const provider = new mod.JsonRpcProvider({
+        url: resolveNearRpcUrl({ nodeUrl: opts.nodeUrl, networkId }),
       });
-      const account = await near.account(opts.accountId);
-      await account.functionCall({
+      // v7 `Account` accepts a `Signer` (or a secret string), never a raw
+      // `KeyPair` object (`KeyPair` has no `signTransaction`, so the write
+      // path would throw into a 500). Build the signer exactly as the
+      // already-fixed MCP live adapter does.
+      const signer = mod.KeyPairSigner.fromSecretKey(opts.privateKey);
+      const account = new mod.Account(opts.accountId, provider, signer);
+      await account.callFunction({
         contractId: opts.contractId,
         methodName: "submit_verdict",
         args: {
@@ -802,6 +837,7 @@ export function createNearChainAdapter(
           consistent,
           signature_base58: signatureBase58,
         },
+        gas: SUBMIT_VERDICT_GAS,
       });
       return { status: consistent ? "paid" : "held" };
     },
