@@ -166,3 +166,65 @@ a stub holding only id 9 mirrors nothing, mirroring the on-chain walk.)
 3. Spot-check `requests` row id 9 carries the on-chain `payee`/`amount_yocto`.
 4. `GET /api/requests?limit=5` → 200 JSON array, length ≤ 5, each item
    with `request_id`/`status`.
+
+## Attack suite one-command replay
+
+`attack-suite.sh` provisions fixture state on testnet, fires 3 blocked
+attacks plus 1 clean transit, and prints per-gate pass/fail — the
+reproducible money-shot for judges. `fixtures.sh` runs the idempotent
+setup step alone. Both are thin executable wrappers around the companion
+Node helpers, which use `near-api-js` v7 plus a locally-generated suite
+Ed25519 key (base58 via root `bs58`).
+
+Required env (same signer as provisioning, plus the guard id):
+
+```sh
+export GUARD_CONTRACT_ID=guard.signer.testnet   # or NEAR_CONTRACT_ID, or --contract
+export NEAR_ACCOUNT_ID=signer.testnet           # funded owner, agent parent
+export NEAR_PRIVATE_KEY=ed25519:...
+```
+
+One command from a fresh clone:
+
+```sh
+./scripts/attack-suite.sh
+```
+
+Expected stdout (exit 0), one line per gate, each carrying `request_id=`
+and `tx=` references (held/paid lines also carry `verdict_tx=` plus the
+fixture `attestation=` fields):
+
+```text
+GATE over-allowance: BLOCKED request_id=<n> tx=<hash>
+GATE allowlist: BLOCKED request_id=<n> tx=<hash>
+GATE purpose-mismatch: HELD request_id=<n> tx=<hash> verdict_tx=<hash> attestation=verifier:<base58> sig:<prefix>
+GATE clean-transit: PAID request_id=<n> tx=<hash> verdict_tx=<hash> attestation=verifier:<base58> sig:<prefix>
+```
+
+Gate contract:
+
+- `over-allowance`: `20` NEAR to the good payee cites `invoice-114` — above
+  the `10` NEAR per-payment cap, inside the daily allowance and the `30`
+  NEAR ref cap — and is rejected with `ExceedsPerPaymentCap`.
+- `allowlist`: `1` NEAR to the evil probe payee (never allowlisted) is
+  rejected with `PayeeNotAllowlisted`.
+- `purpose-mismatch`: `5` NEAR to the allowlisted attacker payee with a
+  poisoned vendor stages, then the fixture `consistent=false` verdict holds
+  it (`held`).
+- `clean-transit`: `5` NEAR to the good payee with `invoice-114`/`CoreWeave`
+  stages, then the fixture `consistent=true` verdict pays it (`paid`).
+
+Re-running is safe: fixtures skip provisioned agents, skip
+`already registered` purpose refs, overwrite the agent policy (daily `1000`
+NEAR for re-run headroom, cap stays `10` NEAR), and reuse the suite key at
+`scripts/.agent-keys/verifier.json` — the second run also exits 0.
+
+```sh
+./scripts/attack-suite.sh --skip-fixtures   # fixtures already provisioned
+./scripts/attack-suite.sh --help             # full flag reference
+```
+
+Fixture vs live: the suite signs verdicts with its local suite key
+registered via the owner-gated `set_verifier` — the `attestation=` fields
+name that key and never claim TEE verification. Live NEAR AI judgment
+stays an operator step: `node scripts/verifier-live-smoke.mjs --judge`.
