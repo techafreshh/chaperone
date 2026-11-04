@@ -355,6 +355,60 @@ mod tests {
     }
 
     #[test]
+    fn staged_requests_do_not_inflate_pending_queue_until_held() {
+        let (mut guard, key) = staged_guard();
+        // Staged-only: three staged requests, nothing awaiting a decision.
+        assert_eq!(guard.fleet_summary().pending_queue, 0);
+        assert!(guard.list_queue().is_empty());
+        let staged = guard.list_requests(0, 10);
+        assert_eq!(staged.len(), 3);
+        assert!(staged.iter().all(|record| record.status == "staged"));
+
+        // One hold: only the held request counts toward pending.
+        set_predecessor("anyone.near");
+        guard.submit_verdict(1, false, sign_as(&key, &guard, 1, false));
+        assert_eq!(guard.fleet_summary().pending_queue, 1);
+        let queue = guard.list_queue();
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].request_id, 1);
+        assert_eq!(
+            guard.fleet_summary().pending_queue,
+            guard.list_queue().len() as u64
+        );
+
+        // A paid sibling stays out of the queue with the staged one.
+        guard.submit_verdict(2, true, sign_as(&key, &guard, 2, true));
+        assert_eq!(
+            guard.get_request(2).expect("request must exist").status,
+            "paid"
+        );
+        assert_eq!(
+            guard.get_request(3).expect("request must exist").status,
+            "staged"
+        );
+        assert_eq!(guard.fleet_summary().pending_queue, 1);
+        assert_eq!(guard.list_queue()[0].request_id, 1);
+
+        // A second hold raises pending to two; owner decisions drain it.
+        guard.submit_verdict(3, false, sign_as(&key, &guard, 3, false));
+        assert_eq!(guard.fleet_summary().pending_queue, 2);
+
+        set_predecessor(OWNER);
+        guard.approve_hold(1);
+        assert_eq!(
+            guard.get_request(1).expect("request must exist").status,
+            "paid"
+        );
+        guard.reject_hold(3);
+        assert_eq!(
+            guard.get_request(3).expect("request must exist").status,
+            "rejected"
+        );
+        assert!(guard.list_queue().is_empty());
+        assert_eq!(guard.fleet_summary().pending_queue, 0);
+    }
+
+    #[test]
     fn approve_hold_pays_and_reject_hold_rejects() {
         let (mut guard, key) = staged_guard();
         set_predecessor("anyone.near");
