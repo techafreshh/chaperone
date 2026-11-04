@@ -22,15 +22,12 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: app/package-lock.json
+          cache-dependency-path: package-lock.json
       - name: Install app dependencies
-        working-directory: app
         run: npm ci
       - name: Test app
-        working-directory: app
-        run: npm test
+        run: npm test --workspace app
       - name: Build app
-        working-directory: app
         run: npm run build
 
   scripts:
