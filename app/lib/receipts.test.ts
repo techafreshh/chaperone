@@ -15,13 +15,14 @@ import {
   normalizeReceiptRow,
   receiptsToCsv,
 } from "./receipts";
+import type { Env } from "./env";
 
-const EMPTY_ENV = {} as NodeJS.ProcessEnv;
+const EMPTY_ENV: Env = {};
 
-const READY_ENV = {
+const READY_ENV: Env = {
   SUPABASE_URL: "https://x.supabase.co",
   SUPABASE_SERVICE_KEY: "service-key",
-} as NodeJS.ProcessEnv;
+};
 
 function throwingFetch(): typeof fetch {
   return (async () => {

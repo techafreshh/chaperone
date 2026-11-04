@@ -6,11 +6,12 @@ import {
   handleRequestsGet,
   listRequests,
 } from "./supabase";
+import type { Env } from "./env";
 
-const READY_ENV = {
+const READY_ENV: Env = {
   SUPABASE_URL: "https://x.supabase.co",
   SUPABASE_SERVICE_KEY: "service-key",
-} as NodeJS.ProcessEnv;
+};
 
 function stubRows(n: number) {
   return Array.from({ length: n }, (_, i) => ({
@@ -46,7 +47,7 @@ afterEach(() => {
 
 describe("getMirrorStatus", () => {
   it("reports disabled without credentials", () => {
-    expect(getMirrorStatus({} as NodeJS.ProcessEnv)).toEqual({
+    expect(getMirrorStatus({})).toEqual({
       state: "disabled",
       reason: MIRROR_DISABLED_REASON,
     });
@@ -89,7 +90,7 @@ describe("listRequests", () => {
   it("throws a labeled error when disabled", async () => {
     const { impl } = okFetch([]);
     await expect(
-      listRequests(5, impl, {} as NodeJS.ProcessEnv),
+      listRequests(5, impl, {}),
     ).rejects.toThrow(/mirror disabled/);
   });
 
@@ -125,7 +126,7 @@ describe("handleRequestsGet", () => {
     const { impl } = okFetch([]);
     const res = await handleRequestsGet(
       new Request("http://localhost/api/requests?limit=5"),
-      { fetchImpl: impl, env: {} as NodeJS.ProcessEnv },
+      { fetchImpl: impl, env: {} },
     );
     expect(res.status).toBe(503);
     expect(res.headers.get("x-chaperone-mirror")).toBe("disabled");

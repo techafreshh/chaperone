@@ -7,9 +7,10 @@ import {
   getVerifierKey,
   handleVerifierKeyPost,
 } from "./settings";
+import type { Env } from "./env";
 import SettingsPage from "../app/settings/page";
 
-const EMPTY_ENV = {} as NodeJS.ProcessEnv;
+const EMPTY_ENV: Env = {};
 
 // Deterministic 32-byte ed25519-style public key, base58-encoded.
 const GOOD_KEY = bs58.encode(Buffer.alloc(32, 7));
@@ -70,7 +71,7 @@ describe("verifier-key rotation gating", () => {
         cookie,
         rotateInit(GOOD_KEY),
       ),
-      { env: { GUARD_OWNER_ID: "someone-else.testnet" } as NodeJS.ProcessEnv },
+      { env: { GUARD_OWNER_ID: "someone-else.testnet" } },
     );
     expect(res.status).toBe(403);
     expect(await res.json()).toEqual({ error: "not owner" });

@@ -14,13 +14,14 @@ import {
   loadMirrorQueue,
   loadStubQueue,
 } from "./queue";
+import type { Env } from "./env";
 
-const EMPTY_ENV = {} as NodeJS.ProcessEnv;
+const EMPTY_ENV: Env = {};
 
-const READY_ENV = {
+const READY_ENV: Env = {
   SUPABASE_URL: "https://x.supabase.co",
   SUPABASE_SERVICE_KEY: "service-key",
-} as NodeJS.ProcessEnv;
+};
 
 function throwingFetch(): typeof fetch {
   return (async () => {
@@ -207,10 +208,10 @@ describe("frozen join", () => {
         text: async () => "",
       } as unknown as Response;
     }) as unknown as typeof fetch;
-    const env = {
+    const env: Env = {
       GUARD_CONTRACT_ID: "guard.testnet",
       NEAR_RPC_URL: "https://rpc.testnet.near.org",
-    } as NodeJS.ProcessEnv;
+    };
     const chain = await loadChainQueue(impl, env);
     expect(chain.state).toBe("ready");
     if (chain.state === "ready") {
@@ -275,7 +276,7 @@ describe("approve/reject overlay", () => {
     });
     expect(missing.status).toBe(404);
     const file = writeStubFile([{ ...stubRow(40, { status: "paid" }) }]);
-    const env = { QUEUE_STUB_FILE: file } as NodeJS.ProcessEnv;
+    const env: Env = { QUEUE_STUB_FILE: file };
     const notHeld = await handleQueueApprove("40", {
       fetchImpl: throwingFetch(),
       env,

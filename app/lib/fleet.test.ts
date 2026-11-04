@@ -9,8 +9,9 @@ import {
   getFleetState,
   handleAgentsPost,
 } from "./fleet";
+import type { Env } from "./env";
 
-const EMPTY_ENV = {} as NodeJS.ProcessEnv;
+const EMPTY_ENV: Env = {};
 
 function throwingFetch(): typeof fetch {
   return (async () => {
@@ -86,12 +87,12 @@ describe("getFleetState merge rule", () => {
         text: async () => "",
       } as unknown as Response;
     }) as unknown as typeof fetch;
-    const env = {
+    const env: Env = {
       SUPABASE_URL: "https://x.supabase.co",
       SUPABASE_SERVICE_KEY: "service-key",
       GUARD_CONTRACT_ID: "guard.testnet",
       NEAR_RPC_URL: "https://rpc.testnet.near.org",
-    } as NodeJS.ProcessEnv;
+    };
     const state = await getFleetState({ fetchImpl: impl, env });
     expect(state.agents.find((agent) => agent.agent_id === "agent-3")?.active).toBe(
       false,
@@ -145,7 +146,7 @@ describe("getFleetState stub file tier", () => {
     );
     const state = await getFleetState({
       fetchImpl: throwingFetch(),
-      env: { FLEET_STUB_FILE: file } as NodeJS.ProcessEnv,
+      env: { FLEET_STUB_FILE: file },
     });
     expect(state.agents).toHaveLength(4);
     expect(
