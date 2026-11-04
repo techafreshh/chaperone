@@ -1,124 +1,130 @@
 # CHAPERONE
 
-> **Spending limits don't make agents safe. Verifying what they pay *FOR* does.**
+> **Spending limits don't make agents safe. Verifying what they pay *for* does.**
 
-CHAPERONE is mission control for a **fleet** of money-handling AI agents on NEAR.
-It watches what agents pay *for* — not just how much — and stops fraud that sails
-under every budget cap.
+Chaperone is mission control for a fleet of money-handling AI agents on NEAR: every payment routes through a Rust guard contract (`chaperone-guard`), surviving requests are purpose-verified, and humans hold the last word on mismatches.
 
-## Problem
+[Why](#why) • [Prerequisites](#prerequisites) • [Quickstart](#quickstart) • [Usage](#usage) • [Configuration](#configuration) • [Architecture](#architecture) • [Limitations](#limitations) • [Validation](#validation)
 
-Everyone is giving AI agents spending limits. Limits didn't stop the scam that
-arrives *under* the limit: an agent dutifully paying a poisoned invoice, a
-fabricated "GPU renewal", an attacker-controlled vendor — all inside budget.
-Day-one spend guards lock one wallet behind amount caps. Nobody verifies purpose.
-We shipped that.
+## Why
 
-## NEAR
+Everyone gives AI agents spending limits. Limits don't stop the scam that arrives *under* the limit: an agent dutifully paying a poisoned invoice, a fabricated "GPU renewal", an attacker-controlled vendor — all inside budget. Amount caps check how much; nobody checks what for. Chaperone verifies purpose: deterministic on-chain checks first (allowance, per-payment cap, payee allowlist, a purpose reference that must resolve to a real invoice in the books), then a signed purpose verdict, then a human decision on anything that doesn't line up. The guard does hold/check/pay — nothing more; the attack suite is the spec.
 
-CHAPERONE is NEAR-native end to end:
+## Prerequisites
 
-- **Guard contract (Rust, `contract/`).** Each agent is a NEAR sub-account whose
-  only key is a *function-call key restricted to the guard contract* — payments
-  physically route through our Rust contract, which holds the signing rights.
-  Deterministic checks first: daily allowance, per-payment cap, payee
-  allowlist, and a purpose reference that must resolve to a real invoice in the
-  books — rejected on-chain, with the reason, in one atomic step.
-- **Purpose verification in a TEE.** Every surviving request is judged by a
-  NEAR AI Cloud model running inside a TEE. Its verdict is signed; its
-  attestation is server-verified (DCAP quote · RTMRS · NVIDIA payload) and shown
-  as a binary-honest chip in the UI: `TEE-verified`, `unverifiable`, or
-  `deterministic-only`. The app never lies.
-- **Humans have the last word.** Mismatches hold the money — one-click
-  release/reject, one-click kill-switch (on-chain freeze + key revocation),
-  receipts waterfall, exportable audit pack. Every state change emits an
-  on-chain event: the audit log *is* the chain.
-- **The guard does hold/check/pay — nothing else.** The attack suite is the spec.
+- `node` 22+ on `PATH` (CI uses Node 22).
+- `git`.
+- Rust toolchain with `cargo` (only for the contract tests the suite runs via `cargo test -p chaperone-guard`).
+- No secrets needed for the default path below — offline gates run credential-free and chain gates print `SKIP` and exit 0 without credentials.
 
-## Try it
+## Quickstart
 
 From a clean clone, no secrets needed:
 
 ```sh
+git clone https://github.com/techafreshh/chaperone.git
+cd chaperone
 npm ci
 scripts/deploy-testnet.sh --dry-run   # prints the exact live deploy sequence, changes nothing
 scripts/attack-suite.sh               # builds the app, probes every page, runs contract tests, exits 0
 ```
 
-Then open the fleet in your browser (the suite starts its own server; or run
-one yourself with `npm run build && npm run start` and visit
-`http://localhost:3000/fleet`).
+Then run the app yourself and open the fleet:
+
+```sh
+npm run build && npm run start
+```
+
+Open `http://localhost:3000/fleet` in your browser. `GET /api/health` returns `{"ok": true}`.
+
+> [!NOTE]
+> Two ports, two servers: `npm run start` (Next.js) listens on port `3000` by default; the attack suite defaults to `$PORT` or `3107` — it reuses a healthy server already on that port, otherwise it builds, starts, and stops its own. Pass `--port <n>` to pin it, or `--help` to see every flag.
 
 What those two commands do:
 
-- `deploy-testnet.sh --dry-run` prints `cargo build` → contract deploy →
-  `register_agent` × 4 → `seed-books` → `provision-agents` → `list_agents`
-  assertion. Add `--live` (with `NEAR_ACCOUNT_ID`/`NEAR_PRIVATE_KEY` set) to
-  execute it for real; add `--sandbox` for the offline `near-workspaces`
-  round trip instead.
-- `scripts/fund-testnet.sh` tops up agents below threshold (faucet first,
-  signer transfer fallback); without credentials it prints its plan and exits 0.
-- `attack-suite.sh` asserts `GET /api/health` → `{"ok":true}`, `GET /fleet`
-  holds 4 agents, `GET /requests` shows a `TEE-verified` row, and
-  `GET /api/audit/export?format=csv` starts with
-  `request_id,status,verdict_signature,chain_tx` — then runs
-  `cargo test -p chaperone-guard`. On-chain gates run too when credentials
-  are present, and print `SKIP` otherwise.
+- `scripts/deploy-testnet.sh --dry-run` (the default mode) prints `cargo build` → contract deploy → `register_agent` × 4 → `seed-books` → `provision-agents` → `list_agents` assertion with zero mutation. Add `--sandbox` for the offline `near-workspaces` round trip, or `--live` (with `NEAR_ACCOUNT_ID`/`NEAR_PRIVATE_KEY` set) to execute against testnet for real.
+- `scripts/attack-suite.sh` asserts `GET /api/health` → `{"ok": true}`, `GET /fleet` holds agents `agent-1` through `agent-4`, `GET /requests` shows a `TEE-verified` row, and `GET /api/audit/export?format=csv` starts with `request_id,status,verdict_signature,chain_tx` — then runs `cargo test -p chaperone-guard`. On-chain gates (3 blocked attacks + 1 clean transit) run too when credentials are present, and print `SKIP` otherwise. Every flag is documented via `scripts/attack-suite.sh --help`.
 
-Per-script flags, env vars, and the live operator checklist live in
-[`scripts/README.md`](./scripts/README.md).
+## Usage
+
+### Pages
+
+| Route | What it shows |
+|---|---|
+| `/fleet` | The 4-agent fleet and per-agent state (tiers: live chain, fixture, stub file, disabled). |
+| `/requests` | Payment requests with binary-honest attestation chips: `TEE-verified`, `unverifiable`, or `deterministic-only`. |
+| `/queue` | Held requests awaiting one-click approve/reject. |
+| `/receipts` | Receipt waterfall plus the CSV audit export. |
+| `/verify` | Live judged-verdict entry point (`POST /verify`). |
+| `/settings` | Guard contract binding and verifier key configuration. |
+
+### APIs
+
+- `GET /api/health` → `{"ok": true}` (quickstart health assertion).
+- `GET /api/audit/export?format=csv` → receipts CSV starting with `request_id,status,verdict_signature,chain_tx`.
+- `POST /api/queue/[id]/approve` and `POST /api/queue/[id]/reject` — human decision on held requests.
+- `POST /api/agents/[id]/kill` (on-chain freeze + key revocation) and `POST /api/agents/[id]/revive`.
+- `POST /api/attestation/preflight` (alias: `/attestation/preflight`) — live preflight against NEAR AI Cloud when `NEAR_AI_API_KEY` is set, fixture mode otherwise.
+
+### MCP
+
+The MCP server (`mcp/`) exposes four tools over guard state — live chain when `GUARD_CONTRACT_ID` is set, otherwise a seeded in-memory fixture that replays the contract's `request_payment` check order: `policy_get`, `request_payment`, `pending`, `attestations`. Reason strings are verbatim copies of the contract (`AgentInactive`, `ExceedsDailyAllowance`, `ExceedsPerPaymentCap`, `PayeeNotAllowlisted`, `PurposeRefNotFound`, …); the fixture never claims TEE proof.
+
+### Scripts
+
+Every script prints its own usage with `--help`; per-script prerequisites, flags, and the live operator checklist live in [`scripts/README.md`](./scripts/README.md).
+
+```sh
+scripts/deploy-testnet.sh --help    # --dry-run (default) | --sandbox | --live
+scripts/attack-suite.sh --help      # --skip-app | --skip-build | --skip-chain | --skip-cargo | --port <n>
+scripts/fund-testnet.sh --help      # top up agents below threshold (--live only; prints plan and exits 0 without creds)
+node scripts/verifier-live-smoke.mjs --help   # live preflight + judged smoke; SKIP with exit 0 when NEAR_AI_API_KEY is unset
+node scripts/sandbox-verify.mjs --help        # offline near-workspaces round trip
+```
+
+## Configuration
+
+Only the variables the code actually reads. CLI flags override env in every script (`--contract`, `--account-id`, `--private-key`, `--rpc-url`).
+
+| Variable | Used by | Default |
+|---|---|---|
+| `GUARD_CONTRACT_ID` | Attack/chain gates (`resolveGuardId`), app chain tiers (`fleet`, `queue`, `receipts`, `verify`), MCP live adapter, mirror | _(none — live paths stay disabled/SKIP without it)_ |
+| `NEAR_CONTRACT_ID` | Legacy fallback for the guard id in the same readers | _(none)_ |
+| `NEAR_ACCOUNT_ID` | Signer (guard owner + agent parent) for deploy, attack suite, fixtures, provision, seed-books, fund, revoke, verify | `signer.testnet` placeholder in `--dry-run` plans only |
+| `NEAR_PRIVATE_KEY` | Signer key (`ed25519:…`) for the same writers | _(none — live writes fail closed without it)_ |
+| `NEAR_RPC_URL` | All NEAR RPC callers | `https://rpc.testnet.near.org` |
+| `SUPABASE_URL` / `SUPABASE_SERVICE_KEY` | Supabase mirror target | _(none — mirror is disabled without both)_ |
+| `MIRROR_POLL_MS` | `mirror-sync` poll interval | `15000` |
+| `MIRROR_STUB_FILE` | Local JSON stub chain for offline mirror runs | _(none)_ |
+| `NEAR_AI_API_KEY` | Attestation preflight/judge (`app/lib/attestation.ts`), verifier live smoke | _(none — fixture mode)_ |
+| `NEAR_AI_MODEL` | Model id for live judgment | `qwen3-30b` |
+| `PORT` | Attack-suite app server port | `3107` (Next.js `npm run start` itself defaults to `3000`) |
+| `FLEET_STUB_FILE` | File-injected fleet tier for harnesses (`loadStubAgents`) | _(none)_ |
+| `SUITE_GOOD_PAYEE` / `SUITE_ATTACKER_PAYEE` / `SUITE_EVIL_PAYEE` | Clean-transit / held-transit / never-allowlisted probes | `good.testnet` / `attacker.testnet` / `evil.testnet` |
+| `SMOKE_BASE_URL` | Verifier live smoke target | `http://localhost:3000` |
+| `VERIFY_REQUEST_ID` | Request id for `--judge` smoke | `5` |
+
+## Architecture
+
+```text
+contract/    Rust guard (chaperone-guard): allowances, per-payment caps, allowlist, purpose refs, hold/reject, events
+app/         Next.js 15 + TypeScript UI and API routes (fleet, requests, queue, receipts, verify, settings)
+scripts/     Operator CLIs: deploy-testnet, attack-suite, fixtures, seed-books, provision-agents, fund-testnet, mirror-sync, sandbox-verify
+verifier/    TEE purpose-judgment pipeline (preflight, judge, bind, sign)
+mcp/         MCP server: policy_get, request_payment, pending, attestations
+```
+
+The money path is one way: agent sub-accounts hold only function-call keys scoped to the guard, so payments physically route through `request_payment` → deterministic checks → signed purpose verdict → human release/reject. Every state change emits an on-chain event.
 
 ## Limitations
 
-- **Sandbox vs live.** Merge-tier verification is deterministic and offline:
-  `--dry-run` prints command sequences, `--sandbox` replays deploy → 4 agents
-  → 3 blocks + 1 staged transit → kill-switch + key revoke against a local
-  `near-workspaces` sandbox (never testnet, never the faucet). Live testnet
-  runs only via explicit `--live` flags with operator credentials.
-- **Faucet is an operator step.** Real testnet funding (faucet top-up, signer
-  transfers, real-deploy receipts and tx hashes) happens post-merge by the
-  operator and is recorded as an issue comment — never baked into the repo.
-- **TEE-degradation honesty.** Without a live attestation the UI shows
-  `unverifiable` or `deterministic-only`, never `TEE-verified`. Fixture rows
-  (fleet agents, request badges, receipt signatures) are labeled display
-  placeholders carrying the probe strings with zero credentials — never
-  synthesized evidence.
-- **No demo video or submission paperwork** in this lap; see
-  [`.agents/PRDs/PRD.md`](./.agents/PRDs/PRD.md) for the full product picture.
+- **Sandbox vs live.** Merge-tier verification is deterministic and offline: `--dry-run` prints command sequences, `--sandbox` replays deploy → 4 agents → staged transit → kill-switch against a local `near-workspaces` sandbox (never testnet, never the faucet). Live testnet runs only via explicit `--live` flags with operator credentials.
+- **Faucet is an operator step.** Real testnet funding (faucet top-up, signer transfers, real-deploy receipts and tx hashes) happens post-merge by the operator and is recorded outside the repo — never baked into the tree.
+- **TEE-degradation honesty.** Without a live attestation the UI shows `unverifiable` or `deterministic-only`, never `TEE-verified`. Fixture rows (fleet agents, request badges, receipt signatures) are display placeholders carrying the probe strings with zero credentials — never synthesized evidence.
+- **Roadmap, not product:** live mainnet deployment, automated faucet funding in CI, video or submission paperwork. See [`.agents/PRDs/PRD.md`](./.agents/PRDs/PRD.md) for the full product picture.
 
-## The approach
+## Validation
 
-- **Agents can't move money directly.** Each agent is a NEAR sub-account whose
-  only key is a *function-call key restricted to the guard contract* — payments
-  physically route through our Rust contract, which holds the signing rights.
-- **Deterministic checks first.** Daily allowance, per-payment cap, payee
-  allowlist, and a purpose reference that must resolve to a real invoice in the
-  books — rejected on-chain, with the reason, in one atomic step.
-- **Purpose verification, in a TEE.** Every surviving request is judged by a
-  NEAR AI Cloud model running inside a TEE. Its verdict is signed; its
-  attestation is server-verified and shown as a binary-honest chip in the UI.
-- **Humans have the last word.** Mismatches hold the money — one-click
-  release/reject, one-click kill-switch, receipts waterfall, audit pack.
+CI (`.github/workflows/ci.yml`) runs five jobs: `contract` (`cargo test -p chaperone-guard`), `app` (install + vitest + build), `scripts` (import checks + `node --test scripts/**/*.test.mjs` + offline sandbox verify), `verifier` (test + `tsc`), `mcp` (test + `tsc` + build). Reproduce the offline core locally with `scripts/deploy-testnet.sh --dry-run` (exit 0, no mutation) and `scripts/attack-suite.sh --skip-chain`.
 
-## Status
-
-Day 2 of the NEAR hackathon window (submission deadline 2026-11-14). Open
-development, in the open:
-
-| Phase | Window | Scope | State |
-|---|---|---|---|
-| 1 — Guard contract skeleton | Nov 2–3 | allowances · pay · hold/reject · events | in progress |
-| 2 — Books + TEE verifier + UI | Nov 4–6 | purpose-refs · attestation pipeline · fleet/feed | next |
-| 3 — Attack suite + kill flows + MCP | Nov 7–8 | 3 scripted on-chain blocks + 1 clean transit | planned |
-| 4 — Demo + repro + submission | Nov 9–13 | video · one-command replay · freeze | planned |
-
-Full product thinking in [`.agents/PRDs/PRD.md`](./.agents/PRDs/PRD.md) — the
-single requirement source for all build work.
-
-Stack: NEAR (Rust near-sdk contract) · NEAR AI Cloud (TEE-hosted purpose model)
-· Next.js 15 + TypeScript + Tailwind · Supabase mirror · MCP server
-(`policy_get` · `request_payment` · `pending` · `attestations`).
-
-## License
-
-MIT.
+MIT — see [`LICENSE`](./LICENSE).
