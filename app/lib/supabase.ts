@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import fs from "node:fs";
 import { getStatus } from "../../verifier/src/preflight";
+import type { Env } from "./env";
 
 // Supabase read mirror client (issue #12). The mirror is query-only: the
 // chain stays the source of truth and these helpers never authorize
@@ -18,7 +19,7 @@ export type MirrorStatus =
   | { state: "ready"; url: string };
 
 export function getMirrorStatus(
-  env: NodeJS.ProcessEnv = process.env,
+  env: Env = process.env,
 ): MirrorStatus {
   const url = (env.SUPABASE_URL ?? "").trim();
   const serviceKey = env.SUPABASE_SERVICE_KEY ?? "";
@@ -108,7 +109,7 @@ function normalizeStubRequest(
 }
 
 export function loadStubRequests(
-  env: NodeJS.ProcessEnv = process.env,
+  env: Env = process.env,
 ): MirrorRequestRow[] | null {
   const path = (env[REQUESTS_STUB_FILE] ?? "").trim();
   if (path === "") return null;
@@ -178,7 +179,7 @@ export const FIXTURE_REQUESTS: MirrorRequestRow[] = [
 // sorted newest-first, every row stamped with a valid `badge`. Mirror
 // failures fall through to the file tiers so the page still renders.
 export async function getMergedRequests(
-  deps: { fetchImpl?: typeof fetch; env?: NodeJS.ProcessEnv } = {},
+  deps: { fetchImpl?: typeof fetch; env?: Env } = {},
 ): Promise<BadgedRequestRow[]> {
   const fetchImpl = deps.fetchImpl ?? fetch;
   const env = deps.env ?? process.env;
@@ -228,7 +229,7 @@ export function clampRequestsLimit(raw: unknown): number {
 export async function listRequests(
   limit: number = DEFAULT_REQUESTS_LIMIT,
   fetchImpl: typeof fetch = fetch,
-  env: NodeJS.ProcessEnv = process.env,
+  env: Env = process.env,
 ): Promise<MirrorRequestRow[]> {
   const status = getMirrorStatus(env);
   if (status.state === "disabled") {
@@ -272,7 +273,7 @@ export async function listRequests(
 // mirror apart from a disabled one.
 export async function handleRequestsGet(
   request: Request,
-  deps: { fetchImpl?: typeof fetch; env?: NodeJS.ProcessEnv } = {},
+  deps: { fetchImpl?: typeof fetch; env?: Env } = {},
 ): Promise<NextResponse> {
   const fetchImpl = deps.fetchImpl ?? fetch;
   const env = deps.env ?? process.env;

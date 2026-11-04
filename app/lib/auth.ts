@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import type { Env } from "./env";
 
 // Operator wallet sessions (issue #17). Fixture-first server sessions:
 // login mints an opaque httpOnly session cookie, kill/revive and verifier
@@ -27,7 +28,7 @@ export function __resetAuthForTests(): void {
 // Configured fleet owner: `GUARD_OWNER_ID` first, `NEAR_ACCOUNT_ID` as the
 // operator fallback. Empty means the fixture tier (no owner/chain env), in
 // which any logged-in session counts as the owner.
-export function ownerEnv(env: NodeJS.ProcessEnv = process.env): string {
+export function ownerEnv(env: Env = process.env): string {
   return ((env.GUARD_OWNER_ID ?? env.NEAR_ACCOUNT_ID ?? "") as string).trim();
 }
 
@@ -69,7 +70,7 @@ export function getSession(request: Request): OperatorSession | null {
 // differs.
 export function requireOwner(
   request: Request,
-  deps: { env?: NodeJS.ProcessEnv } = {},
+  deps: { env?: Env } = {},
 ): OperatorSession | NextResponse {
   const session = getSession(request);
   if (!session) {
@@ -148,7 +149,7 @@ function pickField(body: Record<string, string>, ...keys: string[]): string | un
 async function verifyWalletSignature(
   fields: Record<string, string>,
   accountId: string,
-  env: NodeJS.ProcessEnv,
+  env: Env,
 ): Promise<void> {
   const signatureB64 = (pickField(fields, "signature") ?? "").trim();
   const publicKey = (pickField(fields, "publicKey", "public_key") ?? "").trim();
@@ -213,7 +214,7 @@ function sessionCookieHeader(token: string): string {
 // cookie set.
 export async function handleLoginPost(
   request: Request,
-  deps: { env?: NodeJS.ProcessEnv } = {},
+  deps: { env?: Env } = {},
 ): Promise<NextResponse> {
   const env = deps.env ?? process.env;
   const fields = await readLoginFields(request);

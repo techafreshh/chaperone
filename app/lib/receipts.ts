@@ -14,6 +14,7 @@
 import { NextResponse } from "next/server";
 import fs from "node:fs";
 import { getMirrorStatus } from "./supabase";
+import type { Env } from "./env";
 
 export interface ReceiptRow {
   request_id: number;
@@ -171,10 +172,10 @@ export function normalizeReceiptRow(
 // `request_id` normalizes from number or numeric string. Null on
 // unset/unreadable/malformed (fall through, never throw).
 export function loadStubReceipts(
-  env: NodeJS.ProcessEnv = process.env,
+  env: Env = process.env,
 ): ReceiptRow[] | null {
   for (const key of [RECEIPTS_STUB_FILE, REQUESTS_STUB_FILE_KEY]) {
-    const path = ((env as Record<string, string | undefined>)[key] ?? "").trim();
+    const path = (env[key] ?? "").trim();
     if (path === "") continue;
     try {
       const parsed: unknown = JSON.parse(fs.readFileSync(path, "utf8"));
@@ -215,7 +216,7 @@ export type MirrorReceiptsResult =
 // paid-only waterfall.
 export async function loadMirrorReceipts(
   fetchImpl: typeof fetch = fetch,
-  env: NodeJS.ProcessEnv = process.env,
+  env: Env = process.env,
 ): Promise<MirrorReceiptsResult> {
   const status = getMirrorStatus(env);
   if (status.state === "disabled") {
@@ -321,7 +322,7 @@ export type ChainReceiptsResult =
 // — never throws, so the page still renders from mirror/stub/fixture.
 export async function loadChainReceipts(
   fetchImpl: typeof fetch = fetch,
-  env: NodeJS.ProcessEnv = process.env,
+  env: Env = process.env,
 ): Promise<ChainReceiptsResult> {
   const contractId = (
     env.GUARD_CONTRACT_ID ??
@@ -365,7 +366,7 @@ export async function loadChainReceipts(
 // is fallback-only: it is used solely when no higher tier produced any
 // paid row, so an injecting harness always sees exactly its own rows.
 export async function getReceipts(
-  deps: { fetchImpl?: typeof fetch; env?: NodeJS.ProcessEnv } = {},
+  deps: { fetchImpl?: typeof fetch; env?: Env } = {},
 ): Promise<ReceiptRow[]> {
   const fetchImpl = deps.fetchImpl ?? fetch;
   const env = deps.env ?? process.env;
@@ -440,7 +441,7 @@ export function receiptsToCsv(rows: ReceiptRow[]): string {
 // any other `format` answers 400.
 export async function handleAuditExportGet(
   request: Request,
-  deps: { fetchImpl?: typeof fetch; env?: NodeJS.ProcessEnv } = {},
+  deps: { fetchImpl?: typeof fetch; env?: Env } = {},
 ): Promise<NextResponse> {
   const format = new URL(request.url).searchParams.get("format") ?? "json";
   if (format !== "json" && format !== "csv") {
