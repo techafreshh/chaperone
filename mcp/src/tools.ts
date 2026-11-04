@@ -474,7 +474,14 @@ async function loadNearApi(): Promise<unknown> {
   }
 }
 
+function isSafeKeystoreName(name: string): boolean {
+  // NEAR account ids use [a-z0-9._-]; reject anything else (notably `/`
+  // and `..`) before the name ever reaches a filesystem join.
+  return /^[A-Za-z0-9._-]+$/.test(name) && !name.includes("..");
+}
+
 function findKeystoreEntry(accountId: string, env: Env): Record<string, unknown> | null {
+  if (!isSafeKeystoreName(accountId)) return null;
   const overrideDir = (env.MCP_KEYSTORE_DIR ?? "").trim();
   const candidates: string[] = [];
   if (overrideDir !== "") {
@@ -515,7 +522,7 @@ function resolveSigner(
   // Full NEAR account ids carry a dot; short refs (agent-1) resolve via
   // `MCP_AGENT_ACCOUNT_ID` or the provisioned keystore below.
   const fullId = envAccount !== "" ? envAccount : agentId.includes(".") ? agentId : null;
-  if (fullId === null) return null;
+  if (fullId === null || !isSafeKeystoreName(fullId)) return null;
   if (envKey !== "") return { accountId: fullId, privateKey: envKey };
   const entry = findKeystoreEntry(fullId, env);
   const stored = entry?.agentPrivateKey ?? entry?.privateKey;
@@ -565,28 +572,25 @@ export function createLiveAdapter(env: Env, fallback?: ChainAdapter): ChainAdapt
         const signer = resolveSigner(input.agentId, env);
         if (signer === null) return backup.submitRequestPayment(input);
         const mod = (await loadNearApi()) as {
-          connect: (config: unknown) => Promise<{
-            account: (id: string) => Promise<{
-              functionCall: (args: unknown) => Promise<unknown>;
-            }>;
-          }>;
-          keyStores: {
-            InMemoryKeyStore: new () => {
-              setKey(n: string, a: string, k: unknown): Promise<void>;
-            };
+          JsonRpcProvider: new (info: { url: string }) => unknown;
+          KeyPairSigner: { fromSecretKey(key: string): unknown };
+          Account: new (
+            accountId: string,
+            provider: unknown,
+            signer: unknown,
+          ) => {
+            callFunction(args: {
+              contractId: string;
+              methodName: string;
+              args: Record<string, unknown>;
+              gas: bigint;
+            }): Promise<unknown>;
           };
-          KeyPair: { fromString(s: string): unknown };
         };
-        const networkId = (env.NEAR_NETWORK ?? "").trim() || "testnet";
-        const keyStore = new mod.keyStores.InMemoryKeyStore();
-        await keyStore.setKey(networkId, signer.accountId, mod.KeyPair.fromString(signer.privateKey));
-        const near = await mod.connect({
-          networkId,
-          nodeUrl: rpcUrl,
-          keyStore,
-        });
-        const account = await near.account(signer.accountId);
-        const result = (await account.functionCall({
+        const provider = new mod.JsonRpcProvider({ url: rpcUrl });
+        const keySigner = mod.KeyPairSigner.fromSecretKey(signer.privateKey);
+        const account = new mod.Account(signer.accountId, provider, keySigner);
+        const result = await account.callFunction({
           contractId,
           methodName: "request_payment",
           args: {
@@ -595,14 +599,10 @@ export function createLiveAdapter(env: Env, fallback?: ChainAdapter): ChainAdapt
             purpose_ref: input.purposeRef,
             vendor: input.vendor,
           },
-          gas: "100000000000000",
-        })) as unknown;
+          gas: BigInt("100000000000000"),
+        });
         const outcome = normalizePaymentOutcome(result);
-        if (outcome !== null) {
-          // Keep the fixture backup aligned so later fixture reads agree.
-          await backup.submitRequestPayment(input).catch(() => undefined);
-          return outcome;
-        }
+        if (outcome !== null) return outcome;
         throw new Error("request_payment bad shape");
       } catch {
         return backup.submitRequestPayment(input);
