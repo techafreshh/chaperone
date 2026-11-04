@@ -72,3 +72,25 @@ jobs:
       - name: Typecheck verifier
         working-directory: verifier
         run: npx tsc --noEmit
+
+  mcp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: mcp/package-lock.json
+      - name: Install mcp dependencies
+        working-directory: mcp
+        run: npm ci
+      - name: Test mcp
+        working-directory: mcp
+        run: npm test
+      - name: Typecheck mcp
+        working-directory: mcp
+        run: npx tsc --noEmit
+      - name: Build mcp
+        working-directory: mcp
+        run: npm run build
