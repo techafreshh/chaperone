@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import bs58 from "bs58";
 import { requireOwner } from "./auth";
+import type { Env } from "./env";
 
 // Verifier-key rotation store (issue #17). The operator-visible key is an
 // in-process overlay (plus the chain `get_verifier` view when live creds
@@ -51,7 +52,7 @@ async function rpcGetVerifier(
 // (plain-`fetch` reader in the `loadChainState` style, never throws), then
 // the rotation overlay, else null.
 export async function getVerifierKey(
-  deps: { fetchImpl?: typeof fetch; env?: NodeJS.ProcessEnv } = {},
+  deps: { fetchImpl?: typeof fetch; env?: Env } = {},
 ): Promise<string | null> {
   const fetchImpl = deps.fetchImpl ?? fetch;
   const env = deps.env ?? process.env;
@@ -132,7 +133,7 @@ async function readKeyFields(request: Request): Promise<Record<string, string>> 
 // `contract/src/verifier.rs` (`decode_verifier_key`), else 400.
 export async function handleVerifierKeyPost(
   request: Request,
-  deps: { env?: NodeJS.ProcessEnv } = {},
+  deps: { env?: Env } = {},
 ): Promise<NextResponse> {
   const env = deps.env ?? process.env;
   const auth = requireOwner(request, { env });

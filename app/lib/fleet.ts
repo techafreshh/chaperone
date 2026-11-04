@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import fs from "node:fs";
 import { getMirrorStatus } from "./supabase";
 import { capToYocto } from "./books";
+import type { Env } from "./env";
 
 // Fleet dashboard data layer (issue #13). Merges three read tiers —
 // Supabase mirror `agents` table first, live chain views (`list_agents`,
@@ -213,7 +214,7 @@ export type MirrorAgentsResult =
 // labeled `unavailable` on transport failure — never throws.
 export async function loadMirrorAgents(
   fetchImpl: typeof fetch = fetch,
-  env: NodeJS.ProcessEnv = process.env,
+  env: Env = process.env,
 ): Promise<MirrorAgentsResult> {
   const status = getMirrorStatus(env);
   if (status.state === "disabled") {
@@ -277,7 +278,7 @@ export interface StubFileState {
 // `{agents, treasury_yocto}`. Null when unset or unreadable (fall through
 // to the next tier, never throw).
 export function loadStubAgents(
-  env: NodeJS.ProcessEnv = process.env,
+  env: Env = process.env,
 ): StubFileState | null {
   const path = (env.FLEET_STUB_FILE ?? "").trim();
   if (path === "") return null;
@@ -367,7 +368,7 @@ export type ChainStateResult =
 // mirror/fixture.
 export async function loadChainState(
   fetchImpl: typeof fetch = fetch,
-  env: NodeJS.ProcessEnv = process.env,
+  env: Env = process.env,
 ): Promise<ChainStateResult> {
   const contractId = (
     env.GUARD_CONTRACT_ID ??
@@ -447,7 +448,7 @@ export function __resetFleetOverlayForTests(): void {
 // chain authoritative); the overlay replaces wholesale as the operator's
 // latest write intent. Treasury prefers chain, then stub, then fixture.
 export async function getFleetState(
-  deps: { fetchImpl?: typeof fetch; env?: NodeJS.ProcessEnv } = {},
+  deps: { fetchImpl?: typeof fetch; env?: Env } = {},
 ): Promise<FleetState> {
   const fetchImpl = deps.fetchImpl ?? fetch;
   const env = deps.env ?? process.env;
@@ -612,7 +613,7 @@ function resolveAmount(
 async function bestEffortPersist(
   agent: FleetAgent,
   fetchImpl: typeof fetch,
-  env: NodeJS.ProcessEnv,
+  env: Env,
 ): Promise<void> {
   try {
     const status = getMirrorStatus(env);
@@ -643,7 +644,7 @@ async function bestEffortPersist(
 
 export async function handleAgentsGet(
   _request: Request,
-  deps: { fetchImpl?: typeof fetch; env?: NodeJS.ProcessEnv } = {},
+  deps: { fetchImpl?: typeof fetch; env?: Env } = {},
 ): Promise<NextResponse> {
   const state = await getFleetState(deps);
   return NextResponse.json(
@@ -664,7 +665,7 @@ export async function handleAgentsGet(
 // not this route. 400 only on missing/empty `agent_id`.
 export async function handleAgentsPost(
   request: Request,
-  deps: { fetchImpl?: typeof fetch; env?: NodeJS.ProcessEnv } = {},
+  deps: { fetchImpl?: typeof fetch; env?: Env } = {},
 ): Promise<NextResponse> {
   const fetchImpl = deps.fetchImpl ?? fetch;
   const env = deps.env ?? process.env;
@@ -731,7 +732,7 @@ export async function handleAgentsPost(
 // (400 only on missing/empty `agent_id`).
 export async function handleAgentsPatch(
   request: Request,
-  deps: { fetchImpl?: typeof fetch; env?: NodeJS.ProcessEnv } = {},
+  deps: { fetchImpl?: typeof fetch; env?: Env } = {},
 ): Promise<NextResponse> {
   const fetchImpl = deps.fetchImpl ?? fetch;
   const env = deps.env ?? process.env;
@@ -830,7 +831,7 @@ export async function handleAgentsPatch(
 export async function setAgentActive(
   agent_id: string,
   active: boolean,
-  deps: { fetchImpl?: typeof fetch; env?: NodeJS.ProcessEnv } = {},
+  deps: { fetchImpl?: typeof fetch; env?: Env } = {},
 ): Promise<FleetAgent | null> {
   const fetchImpl = deps.fetchImpl ?? fetch;
   const env = deps.env ?? process.env;

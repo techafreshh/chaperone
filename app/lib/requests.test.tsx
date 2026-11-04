@@ -21,13 +21,14 @@ import {
   resolveRequestBadge,
   type MirrorRequestRow,
 } from "./supabase";
+import type { Env } from "./env";
 
-const READY_ENV = {
+const READY_ENV: Env = {
   SUPABASE_URL: "https://x.supabase.co",
   SUPABASE_SERVICE_KEY: "service-key",
-} as NodeJS.ProcessEnv;
+};
 
-const DISABLED_ENV = {} as NodeJS.ProcessEnv;
+const DISABLED_ENV: Env = {};
 
 function throwingFetch(): typeof fetch {
   return (async () => {
@@ -197,12 +198,12 @@ describe("getMergedRequests", () => {
       { ...stubRow(2), status: "paid", reason: "stub-paid" },
       { ...stubRow(9), status: "staged", badge: "unverifiable" },
     ]);
-    const env = { [REQUESTS_STUB_FILE]: file } as NodeJS.ProcessEnv;
+    const env: Env = { [REQUESTS_STUB_FILE]: file };
     const mirrorRows = [{ ...stubRow(2), status: "held", reason: "mirror-held" }];
-    const withMirror = {
+    const withMirror: Env = {
       ...READY_ENV,
       [REQUESTS_STUB_FILE]: file,
-    } as NodeJS.ProcessEnv;
+    };
     const stubOnly = await getMergedRequests({ fetchImpl: throwingFetch(), env });
     expect(
       stubOnly.find((row) => row.request_id === 2)?.status,

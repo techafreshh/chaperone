@@ -6,6 +6,7 @@ import {
   requireOwner,
   SESSION_COOKIE,
 } from "./auth";
+import type { Env } from "./env";
 import {
   __resetFleetOverlayForTests,
   getFleetState,
@@ -13,7 +14,7 @@ import {
 import { POST as killPost } from "../app/api/agents/[id]/kill/route";
 import { POST as revivePost } from "../app/api/agents/[id]/revive/route";
 
-const EMPTY_ENV = {} as NodeJS.ProcessEnv;
+const EMPTY_ENV: Env = {};
 
 function throwingFetch(): typeof fetch {
   return (async () => {
@@ -122,7 +123,7 @@ describe("fixture login", () => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ account_id: "mallory.testnet" }),
       }),
-      { env: { GUARD_OWNER_ID: "owner.testnet" } as NodeJS.ProcessEnv },
+      { env: { GUARD_OWNER_ID: "owner.testnet" } },
     );
     expect(res.status).toBe(403);
     expect(await res.json()).toEqual({ error: "not owner" });

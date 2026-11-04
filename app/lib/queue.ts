@@ -13,6 +13,7 @@
 import { NextResponse } from "next/server";
 import fs from "node:fs";
 import { getMirrorStatus } from "./supabase";
+import type { Env } from "./env";
 
 export interface QueueRow {
   request_id: number;
@@ -175,10 +176,10 @@ function normalizeQueueRow(raw: Record<string, unknown>): QueueRow | null {
 // defaults to `staged`. Null on unset/unreadable/malformed (fall through,
 // never throw).
 export function loadStubQueue(
-  env: NodeJS.ProcessEnv = process.env,
+  env: Env = process.env,
 ): QueueRow[] | null {
   for (const key of [QUEUE_STUB_FILE, REQUESTS_STUB_FILE_KEY]) {
-    const path = ((env as Record<string, string | undefined>)[key] ?? "").trim();
+    const path = (env[key] ?? "").trim();
     if (path === "") continue;
     try {
       const parsed: unknown = JSON.parse(fs.readFileSync(path, "utf8"));
@@ -214,7 +215,7 @@ export type MirrorQueueResult =
 // unfiltered mirror still yields a held-only queue.
 export async function loadMirrorQueue(
   fetchImpl: typeof fetch = fetch,
-  env: NodeJS.ProcessEnv = process.env,
+  env: Env = process.env,
 ): Promise<MirrorQueueResult> {
   const status = getMirrorStatus(env);
   if (status.state === "disabled") {
@@ -331,7 +332,7 @@ export type ChainQueueResult =
 // id, labeled `unavailable` on any failure — never throws.
 export async function loadChainQueue(
   fetchImpl: typeof fetch = fetch,
-  env: NodeJS.ProcessEnv = process.env,
+  env: Env = process.env,
 ): Promise<ChainQueueResult> {
   const contractId = (
     env.GUARD_CONTRACT_ID ??
@@ -433,7 +434,7 @@ export function __resetQueueOverlayForTests(): void {
 // operator's latest write intent. The exposed list is held-only,
 // newest-first.
 export async function getQueueState(
-  deps: { fetchImpl?: typeof fetch; env?: NodeJS.ProcessEnv } = {},
+  deps: { fetchImpl?: typeof fetch; env?: Env } = {},
 ): Promise<QueueState> {
   const fetchImpl = deps.fetchImpl ?? fetch;
   const env = deps.env ?? process.env;
@@ -515,7 +516,7 @@ export async function getQueueState(
 // Full merged view before the held filter (for 404 diagnostics): overlay
 // included, every status kept.
 async function getMergedAll(
-  deps: { fetchImpl?: typeof fetch; env?: NodeJS.ProcessEnv } = {},
+  deps: { fetchImpl?: typeof fetch; env?: Env } = {},
 ): Promise<Map<number, QueueRow>> {
   const fetchImpl = deps.fetchImpl ?? fetch;
   const env = deps.env ?? process.env;
@@ -634,7 +635,7 @@ export function createQueueChainAdapter(
 }
 
 function liveQueueAdapter(
-  env: NodeJS.ProcessEnv,
+  env: Env,
   fetchImpl: typeof fetch,
 ): QueueChainAdapter | null {
   const contractId = (
@@ -674,7 +675,7 @@ function contractErrorToStatus(message: string): number | null {
 
 export async function handleQueueApprove(
   rawId: unknown,
-  deps: { fetchImpl?: typeof fetch; env?: NodeJS.ProcessEnv } = {},
+  deps: { fetchImpl?: typeof fetch; env?: Env } = {},
 ): Promise<NextResponse> {
   const fetchImpl = deps.fetchImpl ?? fetch;
   const env = deps.env ?? process.env;
@@ -718,7 +719,7 @@ export async function handleQueueApprove(
 
 export async function handleQueueReject(
   rawId: unknown,
-  deps: { fetchImpl?: typeof fetch; env?: NodeJS.ProcessEnv } = {},
+  deps: { fetchImpl?: typeof fetch; env?: Env } = {},
 ): Promise<NextResponse> {
   const fetchImpl = deps.fetchImpl ?? fetch;
   const env = deps.env ?? process.env;
