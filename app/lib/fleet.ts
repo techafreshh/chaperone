@@ -36,9 +36,7 @@ const YOCTO_PER_NEAR = BigInt(10) ** BigInt(24);
 const YOCTO_50_NEAR = "50000000000000000000000000";
 const YOCTO_45_NEAR = "45000000000000000000000000";
 const YOCTO_40_NEAR = "40000000000000000000000000";
-const YOCTO_30_NEAR = "30000000000000000000000000";
 const YOCTO_25_NEAR = "25000000000000000000000000";
-const YOCTO_20_NEAR = "20000000000000000000000000";
 const YOCTO_10_NEAR = "10000000000000000000000000";
 const YOCTO_5_NEAR = "5000000000000000000000000";
 
@@ -50,8 +48,8 @@ export const FLEET_FIXTURE_AGENTS: FleetAgent[] = [
     agent_id: "agent-1",
     allowance_yocto: YOCTO_50_NEAR,
     cap_yocto: YOCTO_10_NEAR,
-    spent_today_yocto: YOCTO_30_NEAR,
-    remaining_today_yocto: YOCTO_20_NEAR,
+    spent_today_yocto: "0",
+    remaining_today_yocto: YOCTO_50_NEAR,
     active: true,
   },
   {

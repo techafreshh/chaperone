@@ -186,3 +186,22 @@ describe("getFleetState disabled mirror", () => {
     ]);
   });
 });
+
+describe("getFleetState fixture zero-spent baseline (issue #48)", () => {
+  it("agent-1 reads zero spent with a 25 NEAR request fitting remaining", async () => {
+    const state = await getFleetState({ fetchImpl: throwingFetch(), env: EMPTY_ENV });
+    const agent1 = state.agents.find((agent) => agent.agent_id === "agent-1");
+    expect(agent1).toBeDefined();
+    expect(agent1?.spent_today_yocto).toBe("0");
+    expect(agent1?.remaining_today_yocto).toBe(agent1?.allowance_yocto);
+    expect(BigInt(agent1?.remaining_today_yocto ?? "0")).toBeGreaterThanOrEqual(
+      BigInt(capToYocto("25")),
+    );
+    for (const agent of state.agents) {
+      const allowance = BigInt(agent.allowance_yocto);
+      const spent = BigInt(agent.spent_today_yocto);
+      const expected = allowance >= spent ? allowance - spent : BigInt(0);
+      expect(BigInt(agent.remaining_today_yocto)).toBe(expected);
+    }
+  });
+});
