@@ -11,6 +11,9 @@
 
 import { dirname, join } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
+const HERE = dirname(fileURLToPath(import.meta.url));
 
 export const STATUS_STAGED = "staged";
 export const STATUS_HELD = "held";
@@ -477,7 +480,7 @@ function findKeystoreEntry(accountId: string, env: Env): Record<string, unknown>
   if (overrideDir !== "") {
     candidates.push(join(overrideDir, `${accountId}.json`));
   } else {
-    let dir = __dirname;
+    let dir = HERE;
     for (let i = 0; i < 6; i += 1) {
       candidates.push(join(dir, "scripts", ".agent-keys", `${accountId}.json`));
       const parent = dirname(dir);
@@ -558,9 +561,9 @@ export function createLiveAdapter(env: Env, fallback?: ChainAdapter): ChainAdapt
       return backup.getAgent(agentId);
     },
     async submitRequestPayment(input: RequestPaymentInput): Promise<PaymentOutcome> {
-      const signer = resolveSigner(input.agentId, env);
-      if (signer === null) return backup.submitRequestPayment(input);
       try {
+        const signer = resolveSigner(input.agentId, env);
+        if (signer === null) return backup.submitRequestPayment(input);
         const mod = (await loadNearApi()) as {
           connect: (config: unknown) => Promise<{
             account: (id: string) => Promise<{
