@@ -700,8 +700,9 @@ function normalizeViewRequest(value: unknown): PaymentRequestShape | null {
 }
 
 // v7 `near-api-js` module shape the live adapter drives (unsigned reads
-// via `JsonRpcProvider.query`, signed writes via `Account.callFunction`).
-// Mirrors the proven write block in `scripts/seed-books.mjs` and the
+// via `JsonRpcProvider.query`, signed writes via `KeyPairSigner` plus
+// `Account.callFunction`). Mirrors the already-fixed live write path in
+// `mcp/src/tools.ts` (`KeyPairSigner.fromSecretKey`) and the
 // unsigned-read shape in `scripts/attack-suite.mjs`.
 export interface NearApiModuleShape {
   JsonRpcProvider: new (args: { url: string }) => {
@@ -710,7 +711,7 @@ export interface NearApiModuleShape {
   Account: new (
     accountId: string,
     provider: unknown,
-    keyPair: unknown,
+    signer: unknown,
   ) => {
     callFunction(args: {
       contractId: string;
@@ -719,7 +720,7 @@ export interface NearApiModuleShape {
       gas: bigint;
     }): Promise<unknown>;
   };
-  KeyPair: { fromString(secretKey: string): unknown };
+  KeyPairSigner: { fromSecretKey(secretKey: string): unknown };
 }
 
 // Gas attached to `submit_verdict`: 30 TGas, matching every script write
@@ -755,13 +756,13 @@ function requireNearApi(mod: unknown): NearApiModuleShape {
     shape === undefined ||
     typeof shape.JsonRpcProvider !== "function" ||
     typeof shape.Account !== "function" ||
-    shape.KeyPair === undefined ||
-    shape.KeyPair === null ||
-    typeof (shape.KeyPair as { fromString?: unknown }).fromString !==
-      "function"
+    shape.KeyPairSigner === undefined ||
+    shape.KeyPairSigner === null ||
+    typeof (shape.KeyPairSigner as { fromSecretKey?: unknown })
+      .fromSecretKey !== "function"
   ) {
     throw new Error(
-      "live chain unavailable: near-api-js module lacks the v7 JsonRpcProvider/Account/KeyPair surface",
+      "live chain unavailable: near-api-js module lacks the v7 JsonRpcProvider/Account/KeyPairSigner surface",
     );
   }
   return shape as NearApiModuleShape;
@@ -822,8 +823,12 @@ export function createNearChainAdapter(
       const provider = new mod.JsonRpcProvider({
         url: resolveNearRpcUrl({ nodeUrl: opts.nodeUrl, networkId }),
       });
-      const keyPair = mod.KeyPair.fromString(opts.privateKey);
-      const account = new mod.Account(opts.accountId, provider, keyPair);
+      // v7 `Account` accepts a `Signer` (or a secret string), never a raw
+      // `KeyPair` object (`KeyPair` has no `signTransaction`, so the write
+      // path would throw into a 500). Build the signer exactly as the
+      // already-fixed MCP live adapter does.
+      const signer = mod.KeyPairSigner.fromSecretKey(opts.privateKey);
+      const account = new mod.Account(opts.accountId, provider, signer);
       await account.callFunction({
         contractId: opts.contractId,
         methodName: "submit_verdict",

@@ -377,7 +377,9 @@ describe("createNearChainAdapter live adapter (v7)", () => {
   interface FakeSeen {
     urls: string[];
     queries: Array<Record<string, unknown>>;
-    fromStrings: string[];
+    fromSecretKeys: string[];
+    createdSigners: unknown[];
+    accountSigners: unknown[];
     accountIds: string[];
     calls: Array<{
       contractId: string;
@@ -388,7 +390,7 @@ describe("createNearChainAdapter live adapter (v7)", () => {
   }
 
   function makeFakeSeen(): FakeSeen {
-    return { urls: [], queries: [], fromStrings: [], accountIds: [], calls: [] };
+    return { urls: [], queries: [], fromSecretKeys: [], createdSigners: [], accountSigners: [], accountIds: [], calls: [] };
   }
 
   // Injected fake v7 module: records every constructor/call argument so
@@ -406,8 +408,20 @@ describe("createNearChainAdapter live adapter (v7)", () => {
         }
       },
       Account: class {
-        constructor(accountId: string, _provider: unknown, _keyPair: unknown) {
+        constructor(accountId: string, _provider: unknown, signer: unknown) {
           seen.accountIds.push(accountId);
+          // Mirror the real v7 `Account`: the signer must quack like a
+          // v7 `Signer` (`signTransaction`), never a raw `KeyPair` (which
+          // only has `sign`/`verify` and throws at sign time on live runs).
+          if (
+            signer === null ||
+            typeof signer !== "object" ||
+            typeof (signer as { signTransaction?: unknown }).signTransaction !==
+              "function"
+          ) {
+            throw new TypeError("signer.signTransaction is not a function");
+          }
+          seen.accountSigners.push(signer);
         }
         async callFunction(args: {
           contractId: string;
@@ -419,10 +433,15 @@ describe("createNearChainAdapter live adapter (v7)", () => {
           return {};
         }
       },
-      KeyPair: {
-        fromString(secretKey: string) {
-          seen.fromStrings.push(secretKey);
-          return { secretKey };
+      KeyPairSigner: {
+        fromSecretKey(secretKey: string) {
+          seen.fromSecretKeys.push(secretKey);
+          const signer = {
+            secretKey,
+            signTransaction: async () => ({}),
+          };
+          seen.createdSigners.push(signer);
+          return signer;
         },
       },
     };
@@ -484,8 +503,12 @@ describe("createNearChainAdapter live adapter (v7)", () => {
     expect(seen.calls[0]?.gas).toBe(SUBMIT_VERDICT_GAS);
     expect(seen.calls[0]?.gas).toBe(BigInt(30) * BigInt(10) ** BigInt(12));
     expect(seen.calls[1]?.args).toMatchObject({ request_id: 5, consistent: false });
-    expect(seen.fromStrings).toEqual(["ed25519:fake", "ed25519:fake"]);
+    expect(seen.fromSecretKeys).toEqual(["ed25519:fake", "ed25519:fake"]);
     expect(seen.accountIds).toEqual(["signer.testnet", "signer.testnet"]);
+    // The `Account` must receive exactly the `KeyPairSigner` built from
+    // the private key — never a raw `KeyPair` object.
+    expect(seen.accountSigners).toHaveLength(2);
+    expect(seen.accountSigners).toEqual(seen.createdSigners);
   });
 
   it("throws live chain unavailable for the old connect-shape module", async () => {
