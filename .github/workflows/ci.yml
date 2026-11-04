@@ -53,10 +53,17 @@ jobs:
           node scripts/revoke-key.mjs --help
           node scripts/fixtures.mjs --help
           bash scripts/fixtures.sh --help
+          node scripts/deploy-testnet.mjs --help
+          bash scripts/deploy-testnet.sh --help
+          node scripts/fund-testnet.mjs --help
+          bash scripts/fund-testnet.sh --help
+          node scripts/sandbox-verify.mjs --help
           node scripts/attack-suite.mjs --help
           bash scripts/attack-suite.sh --help
       - name: Run offline script tests
         run: node --test 'scripts/**/*.test.mjs'
+      - name: Sandbox verify (offline-tolerant)
+        run: node scripts/sandbox-verify.mjs
 
   verifier:
     runs-on: ubuntu-latest

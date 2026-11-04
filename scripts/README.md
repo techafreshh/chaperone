@@ -228,3 +228,87 @@ Fixture vs live: the suite signs verdicts with its local suite key
 registered via the owner-gated `set_verifier` — the `attestation=` fields
 name that key and never claim TEE verification. Live NEAR AI judgment
 stays an operator step: `node scripts/verifier-live-smoke.mjs --judge`.
+
+## Testnet deploy, funding, and full delivery (issue #21)
+
+Three thin executable wrappers plus one `near-workspaces` sandbox round
+trip, all defaulting to deterministic offline/fixture behavior. Live
+RPC/faucet paths activate only with explicit `--live` and credentials;
+`--dry-run` performs zero mutation and prints the exact live sequence.
+
+### Deploy
+
+```sh
+scripts/deploy-testnet.sh --dry-run                          # default without creds: print plan, exit 0
+scripts/deploy-testnet.sh --sandbox                          # near-workspaces round trip (offline-tolerant)
+scripts/deploy-testnet.sh --live --contract guard.s.testnet  # build WASM, deploy, seed, provision, verify list_agents
+scripts/deploy-testnet.sh --help                             # full flag reference
+```
+
+`--live` requires `--contract` (or `$NEAR_CONTRACT_ID`) plus
+`NEAR_ACCOUNT_ID`/`NEAR_PRIVATE_KEY` and fails closed without them. Steps:
+`cargo build -p chaperone-guard --target wasm32-unknown-unknown --release`,
+deploy the WASM (onto the owner account, an existing contract account, or a
+fresh `guard.<signer>` sub-account), `seed-books.mjs`, then
+`provision-agents.mjs --count 4`, then an assertion that `list_agents`
+contains all 4 agents. Env: `NEAR_ACCOUNT_ID`, `NEAR_PRIVATE_KEY`,
+`NEAR_RPC_URL` (default testnet), `NEAR_CONTRACT_ID`, `--count` (default 4),
+`--wasm` (default `contract/target/wasm32-unknown-unknown/release/chaperone_guard.wasm`).
+
+### Fund
+
+```sh
+scripts/fund-testnet.sh                 # no creds: SKIP + dry-run plan, exit 0
+scripts/fund-testnet.sh --dry-run       # print view_account / faucet POST / transfer plan, exit 0
+scripts/fund-testnet.sh --live          # query balances, faucet-top-up below threshold, else signer transfer
+scripts/fund-testnet.sh --help          # full flag reference
+```
+
+Per agent the plan shows the `view_account` balance query, the faucet `POST`
+(URL/payload isolated in `FAUCET_URL`/`buildFaucetPayload` in
+`scripts/lib/deploy-plan.mjs`), then the signer-transfer fallback. Amount
+flags (`--threshold`, `--amount`) enforce the explicit non-zero yocto rule
+(`0` means a zero budget on the off-chain path, never unlimited). Never
+commits `scripts/.agent-keys/` (git-ignored). Env: same signer vars as
+provisioning, plus `--agent` (repeatable) or `--count` (default 4),
+`--faucet-url` override.
+
+### Sandbox verify
+
+`node scripts/sandbox-verify.mjs` (via `deploy-testnet.sh --sandbox`)
+deploys the locally built WASM with `Worker.init()` + `root.devDeploy`,
+registers 4 agents, replays over-allowance (`ExceedsPerPaymentCap`),
+non-allowlisted payee (`PayeeNotAllowlisted`) and unknown purpose-ref
+(`PurposeRefNotFound`) — all reject-and-record — then one clean transit
+(asserting `PaymentOutcome.status == STAGED`), then kill-switch
+`set_agent_active(agent,false)` (a frozen agent's intake rejects with
+`AgentInactive`) plus a function-call-key add/scope-check/delete round trip
+asserting the `FC_METHOD_NAMES`/`FC_ALLOWANCE_YOCTO` lock shape.
+`await worker.tearDown()` runs in `finally`. Without the built WASM (or
+without `near-workspaces`/the sandbox binary) it prints `SKIP` and exits 0.
+
+### Attack suite offline gates
+
+`./scripts/attack-suite.sh` (no credentials) now always runs the offline
+gates first: it builds the app (unless `--skip-build`), starts the real
+production server on `$PORT` (default `3107`) — reusing a healthy server
+already on that port — and asserts `GET /api/health` → `{"ok":true}`,
+`GET /fleet` holding `agent-1`..`agent-4`, `GET /requests|/queue|/receipts`
+→ 200 with a `TEE-verified` row, and
+`GET /api/audit/export?format=csv` starting with
+`request_id,status,verdict_signature,chain_tx`. Then it runs
+`cargo test -p chaperone-guard` (68 tests) and tears the server down.
+Chain gates run only with guard + signer credentials, otherwise print
+`SKIP` and exit 0. New flags: `--port`, `--skip-app`, `--skip-build`,
+`--skip-chain`, `--skip-cargo`.
+
+## Live operator checklist: testnet (post-funding)
+
+1. `scripts/deploy-testnet.sh --live --contract guard.<signer>` → exit 0,
+   `list_agents` shows 4 agents.
+2. `scripts/fund-testnet.sh --live` → agents above threshold (faucet or
+   signer transfer lines).
+3. `./scripts/attack-suite.sh` → app gates pass, chain gates print 4
+   `GATE …` lines, exit 0.
+4. Append the real-deploy receipt (contract id + tx hashes) as an issue
+   comment — never merge secrets, keystores, or `.env` files.
