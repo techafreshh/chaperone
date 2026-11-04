@@ -4,6 +4,11 @@ import path from "node:path";
 // Resolve TypeScript-style `.js` relative imports (used by the shared
 // verifier library under `../verifier`) to their `.ts` sources.
 const nextConfig: NextConfig = {
+  // Monorepo tracing root: the app bundles shared sources from outside
+  // its folder (`../verifier`), so trace from the repo root instead of
+  // the app dir. Also silences Next's multiple-lockfiles workspace-root
+  // warning now that installs consolidate on the single root lockfile.
+  outputFileTracingRoot: path.join(process.cwd(), ".."),
   webpack(config) {
     // NOTE: `.js` stays first so bare package-subpath imports inside
     // node_modules (e.g. `@noble/hashes/sha3.js` via near-api-js) resolve
