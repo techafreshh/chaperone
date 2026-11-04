@@ -823,3 +823,32 @@ export async function handleAgentsPatch(
   await bestEffortPersist(agent, fetchImpl, env);
   return NextResponse.json({ ok: true, agent_id }, { status: 200 });
 }
+
+// Owner-gated kill/revive write (issue #17): flip `active` on the merged
+// agent row and upsert the overlay so the next `GET /fleet` in the same
+// server process reflects the freeze. Unknown id -> null (the route maps
+// to 404); allowance/cap/spent carry over with `remainingOrComputed`, and
+// the existing best-effort persist never fails the 200.
+export async function setAgentActive(
+  agent_id: string,
+  active: boolean,
+  deps: { fetchImpl?: typeof fetch; env?: NodeJS.ProcessEnv } = {},
+): Promise<FleetAgent | null> {
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const env = deps.env ?? process.env;
+  const current = await getFleetState({ fetchImpl, env });
+  const prev = current.agents.find((agent) => agent.agent_id === agent_id);
+  if (!prev) return null;
+  const agent: FleetAgent = {
+    ...prev,
+    remaining_today_yocto: remainingOrComputed(
+      prev.allowance_yocto,
+      prev.spent_today_yocto,
+      prev.remaining_today_yocto,
+    ),
+    active,
+  };
+  overlay.set(agent_id, agent);
+  await bestEffortPersist(agent, fetchImpl, env);
+  return agent;
+}
