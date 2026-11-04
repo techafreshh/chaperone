@@ -15,6 +15,7 @@
     "verifier:live-smoke": "node scripts/verifier-live-smoke.mjs"
   },
   "dependencies": {
+    "bs58": "^6.0.0",
     "near-api-js": "^7.4.0"
   }
 }
