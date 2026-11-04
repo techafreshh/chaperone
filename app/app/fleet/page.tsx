@@ -1,4 +1,5 @@
 import AgentCard from "../../components/AgentCard";
+import KillButton from "../../components/KillButton";
 import { formatYoctoToNear, getFleetState } from "../../lib/fleet";
 
 export const dynamic = "force-dynamic";
@@ -29,6 +30,7 @@ export default async function FleetPage() {
                 remaining_today_yocto={agent.remaining_today_yocto}
                 active={agent.active}
               />
+              <KillButton agent_id={agent.agent_id} active={agent.active} />
               <form
                 data-testid={`edit-agent-${agent.agent_id}`}
                 method="post"
