@@ -169,9 +169,13 @@ a stub holding only id 9 mirrors nothing, mirroring the on-chain walk.)
 
 ## Attack suite one-command replay
 
-`attack-suite.sh` provisions fixture state on testnet, fires 3 blocked
-attacks plus 1 clean transit, and prints per-gate pass/fail — the
-reproducible money-shot for judges. `fixtures.sh` runs the idempotent
+`attack-suite.sh` runs the offline app HTTP gates plus
+`cargo test -p chaperone-guard` on every run and SKIP-prints the chain
+gates without touching fixtures — the reproducible money-shot for judges
+when credentials are present. With `GUARD_CONTRACT_ID` (or
+`NEAR_CONTRACT_ID`) plus `NEAR_ACCOUNT_ID`/`NEAR_PRIVATE_KEY` it provisions
+fixture state on testnet, then fires 3 blocked attacks plus 1 clean transit
+and prints per-gate pass/fail. `fixtures.sh` runs the idempotent
 setup step alone. Both are thin executable wrappers around the companion
 Node helpers, which use `near-api-js` v7 plus a locally-generated suite
 Ed25519 key (base58 via root `bs58`).
