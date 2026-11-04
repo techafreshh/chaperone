@@ -48,7 +48,9 @@ pub struct Guard {
 
 /// Public read view of fleet funds: logical treasury balance, registered
 /// agent count, and the approval-queue depth (held requests awaiting a
-/// human decision).
+/// human decision). The depth counts held requests only and always equals
+/// `list_queue` length; staged (awaiting verifier), paid, and rejected
+/// requests are excluded.
 #[near(serializers=[borsh, json])]
 #[derive(Clone, Debug, PartialEq)]
 pub struct FleetSummary {
@@ -573,6 +575,10 @@ impl Guard {
         U128::from(self.treasury_yocto)
     }
 
+    /// Fleet rollup: treasury, agent count, and approval-queue depth.
+    /// `pending_queue` is exactly `list_queue().len()` (held requests
+    /// awaiting a human decision); staged, paid, and rejected requests
+    /// never count toward it.
     pub fn fleet_summary(&self) -> FleetSummary {
         FleetSummary {
             treasury_yocto: U128::from(self.treasury_yocto),
