@@ -27,6 +27,7 @@ import {
   APP_GATE_PAGES,
   GATE_DEFS,
   RECEIPTS_CSV_HEADER,
+  RECEIPTS_CSV_HEADER_PREFIX,
   SUITE_DEFAULTS,
   buildVerdictPayload,
   createPurposeRefLedger,
@@ -222,11 +223,12 @@ function runOfflinePurposeRefGates() {
   }
 }
 
-// ---- App HTTP gates (issue #21, offline, fixture-backed) ----
+// ---- App HTTP gates (issue #63, offline, sample-data) ----
 // These run on every invocation unless `--skip-app`: they build the real
 // production bundle, start the real Next.js server, and assert the live
 // HTTP responses the acceptance probes check — health, the four fleet
-// agents, a TEE-verified row, and the CSV audit header.
+// agents labeled `sample data`, no `TEE-verified` on `/requests`, and the
+// CSV audit header with the `source` column.
 
 const APP_HEALTH_TIMEOUT_MS = 120000;
 const APP_POLL_MS = 1000;
@@ -330,20 +332,60 @@ async function runAppGates({ port, skipBuild, appDir }) {
     }
 
     await assertPage(base, "/api/health", ['"ok":true']);
-    await assertPage(base, "/fleet", ["agent-1", "agent-2", "agent-3", "agent-4"]);
-    for (const page of APP_GATE_PAGES.filter((page) => page !== "/fleet")) {
-      await assertPage(base, page);
+    await assertPage(base, "/fleet", [
+      "agent-1",
+      "agent-2",
+      "agent-3",
+      "agent-4",
+      "sample data",
+    ]);
+    for (const page of APP_GATE_PAGES.filter(
+      (page) => page !== "/fleet" && page !== "/requests",
+    )) {
+      await assertPage(base, page, ["sample data"]);
     }
-    const requests = await assertPage(base, "/requests", ["TEE-verified"]);
+    // Offline honesty gate (issue #63): with no credentials `/requests`
+    // carries no `TEE-verified` text and every fixture row shows
+    // `sample data`.
+    const requests = await assertPage(base, "/requests", [
+      "sample data",
+      "invoice-114",
+    ]);
+    if (requests.includes("TEE-verified")) {
+      throw new Error(
+        "app gate /requests: found TEE-verified in offline sample data.",
+      );
+    }
+    if (requests.includes("fixture-sig-")) {
+      throw new Error(
+        "app gate /requests: found placeholder signature in offline sample data.",
+      );
+    }
+    console.log("app gate /requests: 200 + sample-data honesty ok");
     void requests;
     const csvRes = await fetch(`${base}/api/audit/export?format=csv`);
     const csv = await csvRes.text();
     if (csvRes.status !== 200) {
       throw new Error(`app gate /api/audit/export?format=csv: HTTP ${csvRes.status}, expected 200.`);
     }
-    if (!csv.startsWith(RECEIPTS_CSV_HEADER)) {
+    if (!csv.startsWith(RECEIPTS_CSV_HEADER_PREFIX ?? RECEIPTS_CSV_HEADER)) {
       throw new Error(
         `app gate /api/audit/export?format=csv: missing header ${RECEIPTS_CSV_HEADER}.`,
+      );
+    }
+    if (!csv.split("\n")[0].includes("source")) {
+      throw new Error(
+        "app gate /api/audit/export?format=csv: header is missing the source column.",
+      );
+    }
+    if (!csv.includes(",fixture")) {
+      throw new Error(
+        "app gate /api/audit/export?format=csv: fixture rows must read fixture in source.",
+      );
+    }
+    if (csv.includes("fixture-sig-")) {
+      throw new Error(
+        "app gate /api/audit/export?format=csv: fixture rows must not carry placeholder signatures.",
       );
     }
     console.log(`app gate /api/audit/export?format=csv: 200 + header ${RECEIPTS_CSV_HEADER}`);

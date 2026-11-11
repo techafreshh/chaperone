@@ -89,39 +89,86 @@ describe("badge vocabulary", () => {
   });
 });
 
-describe("resolveRequestBadge precedence", () => {
-  it("explicit row badge beats a deterministic-only global", () => {
-    const row = stubRow(1, { badge: "verified" }) as MirrorRequestRow;
-    expect(resolveRequestBadge(row)).toBe("verified");
+describe("resolveRequestBadge precedence (issue #63)", () => {
+  it("fixture rows with badge verified resolve to deterministic-only", () => {
+    const row = stubRow(1, {
+      badge: "verified",
+      source: "fixture",
+    }) as MirrorRequestRow;
+    expect(resolveRequestBadge(row)).toBe("deterministic-only");
   });
 
-  it("row without badge inherits the live global", () => {
-    recordJudgeOutcome({ verified: true, model: "m", fixture: false });
-    const row = stubRow(1) as unknown as MirrorRequestRow;
-    expect(resolveRequestBadge(row)).toBe("verified");
+  it("stub rows with badge verified resolve to deterministic-only", () => {
+    const row = stubRow(1, {
+      badge: "verified",
+      source: "stub",
+    }) as MirrorRequestRow;
+    expect(resolveRequestBadge(row)).toBe("deterministic-only");
   });
 
-  it("explicit unverifiable beats a verified global", () => {
+  it("unsourced rows never resolve to verified", () => {
     recordJudgeOutcome({ verified: true, model: "m", fixture: false });
-    const row = stubRow(1, { badge: "unverifiable" }) as MirrorRequestRow;
+    const row = stubRow(1, {
+      badge: "verified",
+    }) as unknown as MirrorRequestRow;
+    expect(resolveRequestBadge(row)).toBe("deterministic-only");
+  });
+
+  it("mirror rows need a verified preflight plus a bound signature", () => {
+    recordJudgeOutcome({ verified: true, model: "m", fixture: false });
+    const backed = stubRow(1, {
+      source: "mirror",
+      verdict_signature: "ed25519:sig-for-1",
+    }) as unknown as MirrorRequestRow;
+    expect(resolveRequestBadge(backed)).toBe("verified");
+    const unbacked = stubRow(2, {
+      source: "mirror",
+    }) as unknown as MirrorRequestRow;
+    expect(resolveRequestBadge(unbacked)).toBe("deterministic-only");
+  });
+
+  it("mirror rows with a fixture preflight stay non-verified even when backed", () => {
+    recordJudgeOutcome({ verified: true, model: "m", fixture: true });
+    const row = stubRow(1, {
+      source: "mirror",
+      verdict_signature: "ed25519:sig-for-1",
+    }) as unknown as MirrorRequestRow;
+    // A fixture preflight maps to `unverifiable`, never `verified`.
     expect(resolveRequestBadge(row)).toBe("unverifiable");
   });
 
-  it("invalid row badge falls back to the global", () => {
+  it("chain rows with backing resolve to verified", () => {
     recordJudgeOutcome({ verified: true, model: "m", fixture: false });
-    const row = stubRow(1, { badge: "TEE-verified" }) as MirrorRequestRow;
+    const row = stubRow(1, {
+      source: "chain",
+      signature: "ed25519:sig-for-1",
+    }) as unknown as MirrorRequestRow;
     expect(resolveRequestBadge(row)).toBe("verified");
   });
 
+  it("explicit unverifiable on chain/mirror rows still surfaces", () => {
+    recordJudgeOutcome({ verified: true, model: "m", fixture: false });
+    const row = stubRow(1, {
+      source: "mirror",
+      badge: "unverifiable",
+    }) as MirrorRequestRow;
+    expect(resolveRequestBadge(row)).toBe("unverifiable");
+  });
+
   it("falls back to deterministic-only with no row badge and no global", () => {
-    const row = stubRow(1) as unknown as MirrorRequestRow;
+    const row = stubRow(1, {
+      source: "mirror",
+    }) as unknown as MirrorRequestRow;
     expect(resolveRequestBadge(row)).toBe("deterministic-only");
   });
 });
 
 describe("enrichRequestsWithBadge", () => {
-  it("stamps every row with a valid badge without mutating the input", () => {
-    const rows = [stubRow(2), stubRow(1, { badge: "verified" })];
+  it("stamps every row with a valid badge and source without mutating the input", () => {
+    const rows = [
+      stubRow(2, { source: "stub" }),
+      stubRow(1, { badge: "verified", source: "stub" }),
+    ];
     const out = enrichRequestsWithBadge(
       rows as unknown as MirrorRequestRow[],
     );
@@ -129,8 +176,16 @@ describe("enrichRequestsWithBadge", () => {
     for (const row of out) {
       expect(isRequestBadge(row.badge)).toBe(true);
     }
-    expect(out[1].badge).toBe("verified");
+    // Stub rows never resolve to verified, whatever their badge field says.
+    expect(out[1].badge).toBe("deterministic-only");
+    expect(out[1].source).toBe("stub");
     expect(rows[0]).not.toHaveProperty("badge");
+  });
+
+  it("defaults unsourced rows to fixture sample data", () => {
+    const out = enrichRequestsWithBadge([stubRow(5)] as unknown as MirrorRequestRow[]);
+    expect(out[0].source).toBe("fixture");
+    expect(out[0].badge).toBe("deterministic-only");
   });
 });
 
@@ -142,7 +197,7 @@ describe("loadStubRequests", () => {
     ).toBeNull();
   });
 
-  it("accepts a bare array and normalizes string request ids", () => {
+  it("accepts a bare array, normalizes string request ids, and tags stub source", () => {
     const file = writeStubFile([
       { ...stubRow(7), request_id: "7", badge: "unverifiable" },
       { ...stubRow(8), badge: "verified" },
@@ -152,6 +207,9 @@ describe("loadStubRequests", () => {
     expect(rows).toHaveLength(2);
     expect(rows?.map((row) => row.request_id)).toEqual([8, 7]);
     expect(rows?.[1].badge).toBe("unverifiable");
+    for (const row of rows ?? []) {
+      expect(row.source).toBe("stub");
+    }
   });
 
   it("accepts the { requests: [...] } object shape", () => {
@@ -170,7 +228,7 @@ describe("loadStubRequests", () => {
 });
 
 describe("getMergedRequests", () => {
-  it("falls back to the labeled fixture with zero credentials", async () => {
+  it("falls back to labeled sample data with zero credentials", async () => {
     const rows = await getMergedRequests({
       fetchImpl: throwingFetch(),
       env: DISABLED_ENV,
@@ -180,17 +238,21 @@ describe("getMergedRequests", () => {
     expect(paid?.status).toBe("paid");
     expect(String(paid?.purpose_ref)).toContain("invoice-114");
     expect(String(paid?.vendor)).toContain("CoreWeave");
-    expect(paid?.badge).toBe("verified");
+    // Offline fixture rows never render TEE-verified.
+    expect(paid?.badge).toBe("deterministic-only");
+    expect(paid?.source).toBe("fixture");
     const rejected = rows.find((row) => row.request_id === 2);
     expect(rejected?.status).toBe("rejected");
     expect(String(rejected?.reason)).toContain("PayeeNotAllowlisted");
     expect(String(rejected?.reason)).toContain("invoice-114");
+    expect(rejected?.source).toBe("fixture");
     const held = rows.find((row) => row.request_id === 1);
-    expect(held?.badge).toBe("unverifiable");
-    expect(badgeToLabel(held?.badge ?? "deterministic-only")).toBe(
-      "attestation unverifiable",
-    );
+    expect(held?.badge).toBe("deterministic-only");
+    expect(held?.source).toBe("fixture");
     expect(FIXTURE_REQUESTS).toHaveLength(3);
+    for (const row of rows) {
+      expect(row.source).toBe("fixture");
+    }
   });
 
   it("merges stub over fixture and mirror over stub by request_id", async () => {
@@ -224,20 +286,24 @@ describe("getMergedRequests", () => {
 });
 
 describe("handleRequestsGet badge stamping", () => {
-  it("returns 10 stamped rows for a 10-row mirror with ?limit=10", async () => {
+  it("returns 10 stamped mirror rows for a 10-row mirror with ?limit=10", async () => {
     const rows = Array.from({ length: 10 }, (_, i) => stubRow(10 - i));
     const res = await handleRequestsGet(
       new Request("http://localhost/api/requests?limit=10"),
       { fetchImpl: okFetch(rows), env: READY_ENV },
     );
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { badge: unknown }[];
+    const body = (await res.json()) as { badge: unknown; source: unknown }[];
     expect(Array.isArray(body)).toBe(true);
     expect(body).toHaveLength(10);
     for (const row of body) {
       expect(["verified", "unverifiable", "deterministic-only"]).toContain(
         row.badge,
       );
+      // Mirror tier rows carry mirror source; without backing they stay
+      // deterministic-only (never verified from the badge field alone).
+      expect(row.source).toBe("mirror");
+      expect(row.badge).toBe("deterministic-only");
     }
   });
 
@@ -277,24 +343,37 @@ describe("handleRequestsGet badge stamping", () => {
 describe("Badge component", () => {
   it("renders the exact literals with request-scoped test ids", () => {
     const verified = renderToStaticMarkup(
-      <Badge badge="verified" requestId={3} />,
+      <Badge badge="verified" requestId={3} source="mirror" />,
     );
     expect(verified).toContain("TEE-verified");
     expect(verified).toContain("badge-3");
     const unverifiable = renderToStaticMarkup(
-      <Badge badge="unverifiable" requestId={1} />,
+      <Badge badge="unverifiable" requestId={1} source="mirror" />,
     );
     expect(unverifiable).toContain("attestation unverifiable");
     expect(unverifiable).toContain("badge-1");
     const deterministic = renderToStaticMarkup(
-      <Badge badge="deterministic-only" requestId={2} />,
+      <Badge badge="deterministic-only" requestId={2} source="fixture" />,
     );
     expect(deterministic).toContain("deterministic-only");
   });
+
+  it("never renders TEE-verified for fixture or stub rows", () => {
+    const fixture = renderToStaticMarkup(
+      <Badge badge="verified" requestId={3} source="fixture" />,
+    );
+    expect(fixture).not.toContain("TEE-verified");
+    expect(fixture).toContain("deterministic-only");
+    const stub = renderToStaticMarkup(
+      <Badge badge="verified" requestId={3} source="stub" />,
+    );
+    expect(stub).not.toContain("TEE-verified");
+    expect(stub).toContain("deterministic-only");
+  });
 });
 
-describe("requests page probe strings", () => {
-  it("renders TEE-verified, PayeeNotAllowlisted, invoice-114, attestation unverifiable", async () => {
+describe("requests page probe strings (issue #63)", () => {
+  it("renders sample data with no TEE-verified, plus PayeeNotAllowlisted and invoice-114", async () => {
     const savedUrl = process.env.SUPABASE_URL;
     const savedKey = process.env.SUPABASE_SERVICE_KEY;
     const savedStub = process.env[REQUESTS_STUB_FILE];
@@ -304,10 +383,11 @@ describe("requests page probe strings", () => {
     try {
       const html = renderToStaticMarkup(await RequestsPage());
       expect(html).toContain("<h1>Requests</h1>");
-      expect(html).toContain("TEE-verified");
+      expect(html).not.toContain("TEE-verified");
+      expect(html).toContain("sample data");
       expect(html).toContain("PayeeNotAllowlisted");
       expect(html).toContain("invoice-114");
-      expect(html).toContain("attestation unverifiable");
+      expect(html).toContain("deterministic-only");
       expect(html).toContain("request-3");
       expect(html).toContain("badge-3");
     } finally {

@@ -9,8 +9,9 @@ export const runtime = "nodejs";
 // (`GUARD_CONTRACT_ID` set): the operator signs `approve_hold` /
 // `reject_hold` with the owner wallet in the browser; the server sends
 // nothing. Fixture tier: the buttons POST to the server fixture routes.
-// Every row is visibly labeled `fixture` unless the state came from the
-// chain.
+// Every fixture/stub/overlay row is visibly labeled `sample data`
+// (issue #63 — chain and mirror rows carry live evidence and show no
+// tag).
 export default async function QueuePage() {
   const state = await getQueueState();
   const contractId = (
@@ -46,7 +47,9 @@ export default async function QueuePage() {
               <td>{String(row.reason ?? row.objection ?? "")}</td>
               <td>
                 {!row.active ? <p>agent frozen</p> : null}
-                {state.source !== "chain" ? <span>fixture</span> : null}
+                {state.source !== "chain" && state.source !== "mirror" ? (
+                  <span>sample data</span>
+                ) : null}
                 <OwnerWriteButton
                   contractId={contractId}
                   network={network}

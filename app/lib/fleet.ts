@@ -19,6 +19,18 @@ import type { Env } from "./env";
 // transfers bypassing `deposit_fleet_funds` do not credit the logical
 // treasury, mirroring the contract caveat in `contract/src/lib.rs`.
 
+export type FleetSource = "fixture" | "stub" | "mirror" | "chain" | "overlay";
+
+export function isFleetSource(value: unknown): value is FleetSource {
+  return (
+    value === "fixture" ||
+    value === "stub" ||
+    value === "mirror" ||
+    value === "chain" ||
+    value === "overlay"
+  );
+}
+
 export interface FleetAgent {
   agent_id: string;
   allowance_yocto: string;
@@ -26,12 +38,13 @@ export interface FleetAgent {
   spent_today_yocto: string;
   remaining_today_yocto: string;
   active: boolean;
+  source: FleetSource;
 }
 
 export interface FleetState {
   agents: FleetAgent[];
   treasuryYocto: string;
-  source: "fixture" | "stub" | "mirror" | "chain" | "overlay";
+  source: FleetSource;
 }
 
 const YOCTO_PER_NEAR = BigInt(10) ** BigInt(24);
@@ -54,6 +67,7 @@ export const FLEET_FIXTURE_AGENTS: FleetAgent[] = [
     spent_today_yocto: "0",
     remaining_today_yocto: YOCTO_50_NEAR,
     active: true,
+    source: "fixture",
   },
   {
     agent_id: "agent-2",
@@ -62,6 +76,7 @@ export const FLEET_FIXTURE_AGENTS: FleetAgent[] = [
     spent_today_yocto: YOCTO_10_NEAR,
     remaining_today_yocto: YOCTO_40_NEAR,
     active: true,
+    source: "fixture",
   },
   {
     agent_id: "agent-3",
@@ -70,6 +85,7 @@ export const FLEET_FIXTURE_AGENTS: FleetAgent[] = [
     spent_today_yocto: YOCTO_5_NEAR,
     remaining_today_yocto: YOCTO_45_NEAR,
     active: false,
+    source: "fixture",
   },
   {
     agent_id: "agent-4",
@@ -78,6 +94,7 @@ export const FLEET_FIXTURE_AGENTS: FleetAgent[] = [
     spent_today_yocto: "0",
     remaining_today_yocto: YOCTO_25_NEAR,
     active: true,
+    source: "fixture",
   },
 ];
 
@@ -172,9 +189,12 @@ function remainingOrComputed(
 
 // Accepts both mirror-short (`allowance_yocto`) and chain-long
 // (`daily_allowance_yocto`) keys; the `AgentView` field names in
-// `contract/src/policy.rs` are the source of truth.
+// `contract/src/policy.rs` are the source of truth. The caller tags the
+// tier via `source` (fixture/stub/mirror/chain/overlay); raw `source`
+// fields are ignored so a file row can never claim to be live.
 function normalizeAgentRecord(
   raw: Record<string, unknown>,
+  source: FleetSource = "fixture",
 ): FleetAgent | null {
   const idRaw = raw.agent_id ?? raw.agentId ?? raw.id;
   if (typeof idRaw !== "string" || idRaw.trim() === "") return null;
@@ -203,6 +223,7 @@ function normalizeAgentRecord(
     spent_today_yocto,
     remaining_today_yocto,
     active,
+    source,
   };
 }
 
@@ -263,7 +284,7 @@ export async function loadMirrorAgents(
   const agents = (rows as Record<string, unknown>[])
     .map((row) =>
       row !== null && typeof row === "object"
-        ? normalizeAgentRecord(row as Record<string, unknown>)
+        ? normalizeAgentRecord(row as Record<string, unknown>, "mirror")
         : null,
     )
     .filter((agent): agent is FleetAgent => agent !== null)
@@ -293,7 +314,7 @@ export function loadStubAgents(
     const agents = (list as unknown[])
       .map((row) =>
         row !== null && typeof row === "object"
-          ? normalizeAgentRecord(row as Record<string, unknown>)
+          ? normalizeAgentRecord(row as Record<string, unknown>, "stub")
           : null,
       )
       .filter((agent): agent is FleetAgent => agent !== null)
@@ -392,7 +413,7 @@ export async function loadChainState(
       agents = (raw as unknown[])
         .map((row) =>
           row !== null && typeof row === "object"
-            ? normalizeAgentRecord(row as Record<string, unknown>)
+            ? normalizeAgentRecord(row as Record<string, unknown>, "chain")
             : null,
         )
         .filter((agent): agent is FleetAgent => agent !== null)
@@ -677,6 +698,7 @@ export async function handleAgentsGet(
       spent_today_yocto: agent.spent_today_yocto,
       remaining_today_yocto: agent.remaining_today_yocto,
       active: agent.active,
+      source: agent.source,
     })),
     { status: 200 },
   );
@@ -745,6 +767,7 @@ export async function handleAgentsPost(
     spent_today_yocto,
     remaining_today_yocto,
     active,
+    source: "overlay",
   };
   overlay.set(agent_id, agent);
   await bestEffortPersist(agent, fetchImpl, env);
@@ -779,6 +802,7 @@ export async function handleAgentsPatch(
     spent_today_yocto: "0",
     remaining_today_yocto: DEFAULT_ALLOWANCE_YOCTO,
     active: true,
+    source: "overlay",
   };
 
   const allowanceProvided =
@@ -842,6 +866,7 @@ export async function handleAgentsPatch(
     spent_today_yocto,
     remaining_today_yocto,
     active,
+    source: "overlay",
   };
   overlay.set(agent_id, agent);
   await bestEffortPersist(agent, fetchImpl, env);
@@ -873,6 +898,7 @@ export async function setAgentActive(
       prev.remaining_today_yocto,
     ),
     active,
+    source: "overlay",
   };
   overlay.set(agent_id, agent);
   await bestEffortPersist(agent, fetchImpl, env);

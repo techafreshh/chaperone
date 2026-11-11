@@ -4,15 +4,16 @@ import { formatYoctoToNear, getFleetState } from "../../lib/fleet";
 
 export const dynamic = "force-dynamic";
 
-// Fleet page: treasury balance, one card per agent, wallet-signed
-// freeze/revive plus the fixture-tier add/edit forms. Live tier
-// (`GUARD_CONTRACT_ID` set): the operator signs `set_agent_active`
-// (freeze/revive), `register_agent` and `set_agent_policy` with the owner
-// wallet in the browser; the server sends nothing. Fixture tier: the
-// forms POST to the server fixture routes. Every agent row is visibly
-// labeled `fixture` unless the state came from the chain, and `frozen`
-// renders only when the chain view says `active: false` (or on a
-// fixture-labeled row).
+// Fleet page (issue #63 sample-data honesty): treasury balance, one card
+// per agent, wallet-signed freeze/revive plus the fixture-tier add/edit
+// forms. Live tier (`GUARD_CONTRACT_ID` set): the operator signs
+// `set_agent_active` (freeze/revive), `register_agent` and
+// `set_agent_policy` with the owner wallet in the browser; the server
+// sends nothing. Fixture tier: the forms POST to the server fixture
+// routes. Every fixture/stub/overlay row is visibly labeled `sample data`
+// (chain and mirror rows carry live evidence and show no tag), and
+// `frozen` renders only when the chain view says `active: false` (or on a
+// sample-data row).
 export default async function FleetPage() {
   const state = await getFleetState();
   const contractId = (
@@ -45,7 +46,9 @@ export default async function FleetPage() {
                 remaining_today_yocto={agent.remaining_today_yocto}
                 active={agent.active}
               />
-              {state.source !== "chain" ? <span>fixture</span> : null}
+              {agent.source !== "chain" && agent.source !== "mirror" ? (
+                <span>sample data</span>
+              ) : null}
               <KillButton
                 agent_id={agent.agent_id}
                 active={agent.active}

@@ -40,7 +40,38 @@ export interface MirrorRequestRow {
   request_id: number;
   status: string;
   badge?: unknown;
+  source?: unknown;
   [key: string]: unknown;
+}
+
+// Row provenance for the request feed (issue #63). Every merged row
+// carries its tier: `chain` (live contract view), `mirror` (Supabase
+// PostgREST), `stub` (file-injected harness rows), or `fixture`
+// (labeled display data). Fixture and stub rows render a visible
+// `sample data` tag and never resolve to `verified`.
+
+export type RequestSource = "chain" | "mirror" | "stub" | "fixture";
+
+export function isRequestSource(value: unknown): value is RequestSource {
+  return (
+    value === "chain" ||
+    value === "mirror" ||
+    value === "stub" ||
+    value === "fixture"
+  );
+}
+
+// A row is backed by live evidence only when it carries a non-empty
+// signature field bound to that request id (`verdict_signature` /
+// `signature` / `signature_base58`). Fixture and stub tiers never carry
+// live signatures; chain/mirror rows without one are unbacked.
+function hasBoundSignature(row: MirrorRequestRow): boolean {
+  const record = row as Record<string, unknown>;
+  for (const key of ["verdict_signature", "signature", "signature_base58"]) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim() !== "") return true;
+  }
+  return false;
 }
 
 // Attestation badge vocabulary for the request feed (issue #14).
@@ -63,31 +94,57 @@ export function badgeToLabel(badge: RequestBadge): string {
   return "deterministic-only";
 }
 
-export type BadgedRequestRow = MirrorRequestRow & { badge: RequestBadge };
+export type BadgedRequestRow = MirrorRequestRow & {
+  badge: RequestBadge;
+  source: RequestSource;
+};
 
-// Per-row badge with precedence explicit-row > live-global >
-// `deterministic-only`. A row's own valid `badge` wins (lets the harness
-// declare verified/unverifiable per request via mirror or stub rows);
-// otherwise the live `getStatus().badge` applies; a throwing or invalid
-// global falls back to `deterministic-only` so production never fakes
-// `TEE-verified`.
+// Hardened badge (issue #63): `verified` only for chain/mirror rows
+// backed by a verified non-fixture preflight (`getStatus().badge`) plus a
+// signature bound to that request id. Fixture, stub, and unsourced rows
+// never resolve to `verified`, whatever their `badge` field says — the
+// row badge and the unbacked global are ignored for `verified` and fall
+// back to `deterministic-only` (explicit `unverifiable` still surfaces).
 export function resolveRequestBadge(row: MirrorRequestRow): RequestBadge {
-  if (row !== null && typeof row === "object" && isRequestBadge(row.badge)) {
-    return row.badge;
+  const source = (row as { source?: unknown }).source;
+  if (source !== "chain" && source !== "mirror") {
+    return "deterministic-only";
   }
+  const backed = hasBoundSignature(row);
+  let global: RequestBadge | null = null;
   try {
     const live = getStatus().badge;
-    if (isRequestBadge(live)) return live;
+    if (isRequestBadge(live)) global = live;
   } catch {
-    // Fall through to deterministic-only below.
+    global = null;
   }
+  if (backed && global === "verified") return "verified";
+  if (row !== null && typeof row === "object" && row.badge === "unverifiable") {
+    return "unverifiable";
+  }
+  if (
+    row !== null &&
+    typeof row === "object" &&
+    row.badge === "deterministic-only"
+  ) {
+    return "deterministic-only";
+  }
+  if (global === "unverifiable") return "unverifiable";
   return "deterministic-only";
 }
 
 export function enrichRequestsWithBadge(
   rows: MirrorRequestRow[],
 ): BadgedRequestRow[] {
-  return rows.map((row) => ({ ...row, badge: resolveRequestBadge(row) }));
+  return rows.map((row) => {
+    const source: RequestSource = isRequestSource(
+      (row as { source?: unknown }).source,
+    )
+      ? (row.source as RequestSource)
+      : "fixture";
+    const sourced = { ...row, source };
+    return { ...sourced, badge: resolveRequestBadge(sourced) };
+  });
 }
 
 // File-injected request tier for harnesses. `REQUESTS_STUB_FILE` points at
@@ -112,7 +169,7 @@ function normalizeStubRequest(
   );
   if (request_id === null) return null;
   const status = typeof raw.status === "string" ? raw.status : "staged";
-  return { ...raw, request_id, status };
+  return { ...raw, request_id, status, source: "stub" };
 }
 
 export function loadStubRequests(
@@ -139,11 +196,14 @@ export function loadStubRequests(
   }
 }
 
-// Labeled fixture tier for the page merge (test-declared display data, not
-// live evidence): a paid `invoice-114` CoreWeave row (`verified`), a
-// rejected `PayeeNotAllowlisted` poisoned row citing `invoice-114`, and a
-// held row (`unverifiable`). Live mirror rows without an explicit valid
-// `badge` always resolve through the real `getStatus()`.
+// Labeled fixture tier for the page merge (issue #63 sample data, not
+// live evidence): a paid `invoice-114` CoreWeave row, a rejected
+// `PayeeNotAllowlisted` poisoned row citing `invoice-114`, and a held row.
+// Every fixture row carries `source: "fixture"` and a
+// `deterministic-only` badge so the offline page never renders
+// `TEE-verified`; `resolveRequestBadge` additionally forces fixture/stub
+// rows to `deterministic-only` even when a harness injects `badge:
+// "verified"`.
 export const FIXTURE_REQUESTS: MirrorRequestRow[] = [
   {
     request_id: 3,
@@ -154,7 +214,8 @@ export const FIXTURE_REQUESTS: MirrorRequestRow[] = [
     vendor: "CoreWeave",
     status: "paid",
     reason: "allowlisted payee, cap respected",
-    badge: "verified",
+    badge: "deterministic-only",
+    source: "fixture",
   },
   {
     request_id: 2,
@@ -167,6 +228,7 @@ export const FIXTURE_REQUESTS: MirrorRequestRow[] = [
     reason:
       "PayeeNotAllowlisted: payee evil.example not allowlisted for invoice-114",
     badge: "deterministic-only",
+    source: "fixture",
   },
   {
     request_id: 1,
@@ -177,14 +239,16 @@ export const FIXTURE_REQUESTS: MirrorRequestRow[] = [
     vendor: "CoreWeave",
     status: "held",
     reason: "quorum not reached",
-    badge: "unverifiable",
+    badge: "deterministic-only",
+    source: "fixture",
   },
 ];
 
 // Merged request feed for the page: fixture, then stub file, then mirror
 // rows. Union by `request_id` (mirror wins over stub over fixture),
-// sorted newest-first, every row stamped with a valid `badge`. Mirror
-// failures fall through to the file tiers so the page still renders.
+// sorted newest-first, every row stamped with a valid `badge` and an
+// explicit `source`. Mirror failures fall through to the file tiers so
+// the page still renders.
 export async function getMergedRequests(
   deps: { fetchImpl?: typeof fetch; env?: Env } = {},
 ): Promise<BadgedRequestRow[]> {
@@ -192,12 +256,12 @@ export async function getMergedRequests(
   const env = deps.env ?? process.env;
   const merged = new Map<number, MirrorRequestRow>();
   for (const row of FIXTURE_REQUESTS) {
-    merged.set(row.request_id, { ...row });
+    merged.set(row.request_id, { ...row, source: "fixture" });
   }
   const stub = loadStubRequests(env);
   if (stub !== null) {
     for (const row of stub) {
-      merged.set(row.request_id, { ...row });
+      merged.set(row.request_id, { ...row, source: "stub" });
     }
   }
   try {
@@ -209,7 +273,7 @@ export async function getMergedRequests(
       if (request_id === null) continue;
       const status =
         typeof record.status === "string" ? record.status : "staged";
-      merged.set(request_id, { ...record, request_id, status });
+      merged.set(request_id, { ...record, request_id, status, source: "mirror" });
     }
   } catch {
     // Mirror disabled or unreachable: fixture+stub tiers still render.
@@ -309,7 +373,10 @@ export async function handleRequestsGet(
   );
   try {
     const rows = await listRequests(limit, fetchImpl, env);
-    return NextResponse.json(enrichRequestsWithBadge(rows), {
+    return NextResponse.json(
+      enrichRequestsWithBadge(
+        rows.map((row) => ({ ...row, source: "mirror" as const })),
+      ), {
       status: 200,
       headers: { [MIRROR_HEADER]: "ready" },
     });
