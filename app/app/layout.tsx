@@ -1,4 +1,6 @@
+import SiteHeader from "../components/SiteHeader";
 import WalletProvider from "../components/WalletProvider";
+import "./globals.css";
 
 export default function RootLayout({
   children,
@@ -18,6 +20,7 @@ export default function RootLayout({
     <html lang="en">
       <body>
         <WalletProvider contractId={contractId} network={network}>
+          <SiteHeader contractId={contractId} network={network} />
           {children}
         </WalletProvider>
       </body>
