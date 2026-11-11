@@ -58,6 +58,7 @@ jobs:
           node scripts/verify-evidence.mjs --help
           node scripts/attack-suite.mjs --help
           bash scripts/attack-suite.sh --help
+          node scripts/readme-deployment.mjs --help
       - name: Run offline script tests
         run: node --test 'scripts/**/*.test.mjs'
       - name: Sandbox verify (offline-tolerant)
