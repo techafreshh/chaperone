@@ -72,6 +72,8 @@ function loadBooks() {
     if (
       typeof entry?.id !== "string" ||
       typeof entry?.vendor !== "string" ||
+      typeof entry?.payee !== "string" ||
+      entry.payee.trim() === "" ||
       typeof entry?.cap_near !== "string"
     ) {
       throw new Error(`Malformed book entry: ${JSON.stringify(entry)}`);
@@ -119,8 +121,14 @@ async function main() {
   const provider = new JsonRpcProvider({ url: rpcUrl });
   const account = new Account(accountId, provider, keyPair);
 
+  // The suite good payee may be overridden per run (--good-payee /
+  // $SUITE_GOOD_PAYEE): bind the gate ref invoice-114 to it so the
+  // wrong-payee live gate keeps firing. Other sample invoices keep
+  // their books.json payees.
+  const suiteGoodPayee = (process.env.SUITE_GOOD_PAYEE ?? "").trim();
   for (const entry of entries) {
     const maxAmountYocto = capToYocto(entry.cap_near);
+    const payee = entry.id === "invoice-114" && suiteGoodPayee !== "" ? suiteGoodPayee : entry.payee;
     try {
       await account.callFunction({
         contractId,
@@ -128,11 +136,12 @@ async function main() {
         args: {
           ref_id: entry.id,
           vendor: entry.vendor,
+          payee,
           max_amount_yocto: maxAmountYocto,
         },
         gas: CALL_GAS,
       });
-      console.log(`registered ${entry.id} (${entry.vendor})`);
+      console.log(`registered ${entry.id} (${entry.vendor} -> ${payee})`);
     } catch (err) {
       const message = err?.message ?? String(err);
       if (message.includes("already registered")) {
@@ -144,15 +153,16 @@ async function main() {
   }
 
   const refs = await listPurposeRefs(provider, contractId);
-  const target = entries.find((entry) => entry.id === "invoice-114");
+  const targetRaw = entries.find((entry) => entry.id === "invoice-114");
+  const target = targetRaw ? { ...targetRaw, payee: targetRaw.id === "invoice-114" && suiteGoodPayee !== "" ? suiteGoodPayee : targetRaw.payee } : undefined;
   const onChain = Array.isArray(refs)
     ? refs.find((ref) => ref.ref_id === "invoice-114")
     : undefined;
-  if (!target || !onChain || onChain.vendor !== target.vendor) {
-    console.error("Verification failed: invoice-114 missing or vendor mismatch on-chain.");
+  if (!target || !onChain || onChain.vendor !== target.vendor || onChain.payee !== target.payee) {
+    console.error("Verification failed: invoice-114 missing or vendor/payee mismatch on-chain.");
     process.exit(1);
   }
-  console.log(`verified invoice-114 vendor=${onChain.vendor}`);
+  console.log(`verified invoice-114 vendor=${onChain.vendor} payee=${onChain.payee}`);
 }
 
 await main();

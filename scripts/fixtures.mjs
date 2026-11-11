@@ -216,6 +216,7 @@ async function main() {
     "--payee", goodPayee,
     "--payee", attackerPayee,
   ]);
+  process.env.SUITE_GOOD_PAYEE = goodPayee;
   runHelper("seed-books.mjs", [...shared]);
 
   const here = scriptDir();
@@ -245,6 +246,31 @@ async function main() {
     }
   } else {
     console.log(`fixture payees: already allowlisted ${goodPayee},${attackerPayee}`);
+  }
+
+  // 2b. Verify the purpose-ref book binds invoice-114 to the suite good
+  // payee (issue #61): the wrong-payee gate cites it with the attacker
+  // payee and expects PurposeRefPayeeMismatch. Seeded once via
+  // seed-books.mjs; an older deployment without the payee binding fails
+  // closed here with a re-deploy hint.
+  try {
+    const refs = await viewFunction(provider, guardId, "list_purpose_refs", {});
+    const bound = Array.isArray(refs) ? refs.find((ref) => ref?.ref_id === "invoice-114") : undefined;
+    if (!bound) {
+      console.error("Verification failed: invoice-114 is not registered on-chain.");
+      process.exit(1);
+    }
+    if (bound.payee !== goodPayee) {
+      console.error(
+        `Verification failed: invoice-114 payee is ${JSON.stringify(bound.payee)}, expected ${JSON.stringify(goodPayee)} (re-deploy the guard so register_purpose_ref binds the payee).`,
+      );
+      process.exit(1);
+    }
+    console.log(`fixture purpose ref: invoice-114 bound to ${bound.payee} vendor=${bound.vendor}`);
+  } catch (err) {
+    if (err?.message?.includes?.("Verification failed")) throw err;
+    console.error(`Verification failed: list_purpose_refs unreachable: ${err?.message ?? err}.`);
+    process.exit(1);
   }
 
   // 3. Raise the daily allowance for re-run headroom (staged gates draw

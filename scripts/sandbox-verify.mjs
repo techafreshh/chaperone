@@ -199,6 +199,8 @@ async function main() {
     const GOOD_PAYEE = "good.test.near";
     const EVIL_PAYEE = "evil-probe.test.near";
     const PURPOSE_REF = "invoice-114";
+    const PAYOUT_REF = "payout-ref";
+    const GHOST_REF = "ghost-ref";
 
     // Four agents with the same policy the live scripts apply.
     const agents = [];
@@ -221,6 +223,7 @@ async function main() {
     await root.call(contract, "register_purpose_ref", {
       ref_id: PURPOSE_REF,
       vendor: "CoreWeave",
+      payee: GOOD_PAYEE,
       max_amount_yocto: "30000000000000000000000000",
     });
 
@@ -300,10 +303,18 @@ async function main() {
     }
 
     // A payee that really exists: the transfer must land somewhere.
+    // Payouts cite a dedicated ref bound to it (issue #61 binds one
+    // payee per ref; invoice-114 stays bound to GOOD_PAYEE).
     const payee = await root.createSubAccount("payee");
     await root.call(contract, "add_payees", {
       agent_id: agents[1].accountId,
       payees: [payee.accountId],
+    });
+    await root.call(contract, "register_purpose_ref", {
+      ref_id: PAYOUT_REF,
+      vendor: "CoreWeave",
+      payee: payee.accountId,
+      max_amount_yocto: "30000000000000000000000000",
     });
 
     async function submitPayoutVerdict(requestId, consistent) {
@@ -354,7 +365,7 @@ async function main() {
       const outcome = await agents[1].call(contract, "request_payment", {
         payee: payee.accountId,
         amount_yocto: nearToYocto(2),
-        purpose_ref: PURPOSE_REF,
+        purpose_ref: PAYOUT_REF,
         vendor: "CoreWeave",
       });
       assertOutcome(outcome, { status: "staged", reason: null }, "payout-request");
@@ -392,7 +403,7 @@ async function main() {
       const outcome = await agents[1].call(contract, "request_payment", {
         payee: payee.accountId,
         amount_yocto: nearToYocto(2),
-        purpose_ref: PURPOSE_REF,
+        purpose_ref: PAYOUT_REF,
         vendor: "CoreWeave",
       });
       assertOutcome(outcome, { status: "staged", reason: null }, "underfunded-request");
@@ -446,12 +457,18 @@ async function main() {
         agent_id: agents[1].accountId,
         payees: [ghostPayee],
       });
+      await root.call(contract, "register_purpose_ref", {
+        ref_id: GHOST_REF,
+        vendor: "CoreWeave",
+        payee: ghostPayee,
+        max_amount_yocto: "30000000000000000000000000",
+      });
       const treasuryBefore = await viewTreasury(contract);
       const spentBefore = await viewSpentToday(contract, agents[1].accountId);
       const outcome = await agents[1].call(contract, "request_payment", {
         payee: ghostPayee,
         amount_yocto: nearToYocto(1),
-        purpose_ref: PURPOSE_REF,
+        purpose_ref: GHOST_REF,
         vendor: "CoreWeave",
       });
       assertOutcome(outcome, { status: "staged", reason: null }, "ghost-request");
@@ -481,7 +498,7 @@ async function main() {
       const outcome = await agents[1].call(contract, "request_payment", {
         payee: payee.accountId,
         amount_yocto: nearToYocto(1),
-        purpose_ref: PURPOSE_REF,
+        purpose_ref: PAYOUT_REF,
         vendor: "CoreWeave",
       });
       assertOutcome(outcome, { status: "staged", reason: null }, "reject-request");

@@ -29,6 +29,8 @@ import {
   RECEIPTS_CSV_HEADER,
   SUITE_DEFAULTS,
   buildVerdictPayload,
+  createPurposeRefLedger,
+  evaluatePurposeRefRequest,
   formatGateLine,
   resolveGuardId,
   txHashOf,
@@ -164,6 +166,60 @@ function assertRequestId(value) {
     throw new Error(`Bad request_payment shape: request_id is ${JSON.stringify(value)}.`);
   }
   return value;
+}
+
+// Offline fixture replay of the two purpose-ref gates (issue #61): no
+// network, no credentials. Mirrors the contract intake order
+// (payee -> vendor -> remaining) via the pure ledger in
+// `lib/attack-gates.mjs`. Runs on every invocation so
+// `scripts/attack-suite.sh` offline reports both gates as PASS with
+// their reason codes.
+function runOfflinePurposeRefGates() {
+  const NEAR = 10n ** 24n;
+  // Gate wrong-payee: second allowlisted payee cites a ref bound to the first.
+  {
+    const ledger = createPurposeRefLedger({
+      refId: "invoice-114",
+      vendor: "CoreWeave",
+      payee: "a.near",
+      maxYocto: (50n * NEAR).toString(),
+    });
+    const out = evaluatePurposeRefRequest(ledger, {
+      payee: "b.near",
+      vendor: "CoreWeave",
+      amountYocto: (30n * NEAR).toString(),
+    });
+    if (out.status !== "rejected" || out.reason !== "PurposeRefPayeeMismatch") {
+      throw new Error(`Offline gate wrong-payee failed: got ${out.status}/${out.reason ?? null}.`);
+    }
+    console.log(`GATE wrong-payee: PASS reason=${out.reason} payee=b.near ref=invoice-114`);
+  }
+  // Gate same-invoice-twice: the second payment is above what is left.
+  {
+    const ledger = createPurposeRefLedger({
+      refId: "invoice-114",
+      vendor: "CoreWeave",
+      payee: "a.near",
+      maxYocto: (50n * NEAR).toString(),
+    });
+    const first = evaluatePurposeRefRequest(ledger, {
+      payee: "a.near",
+      vendor: "CoreWeave",
+      amountYocto: (30n * NEAR).toString(),
+    });
+    if (first.status !== "staged") {
+      throw new Error(`Offline gate same-invoice-twice setup failed: first is ${first.status}.`);
+    }
+    const second = evaluatePurposeRefRequest(ledger, {
+      payee: "a.near",
+      vendor: "CoreWeave",
+      amountYocto: (30n * NEAR).toString(),
+    });
+    if (second.status !== "rejected" || second.reason !== "ExceedsPurposeRefRemaining") {
+      throw new Error(`Offline gate same-invoice-twice failed: got ${second.status}/${second.reason ?? null}.`);
+    }
+    console.log(`GATE same-invoice-twice: PASS reason=${second.reason} remaining=20000000000000000000000000`);
+  }
 }
 
 // ---- App HTTP gates (issue #21, offline, fixture-backed) ----
@@ -331,6 +387,15 @@ async function main() {
   const appDir = join(repoRoot, "app");
   const port = parsePort(args.port ?? process.env.PORT ?? "3107");
 
+  // Purpose-ref offline gates run on every invocation (no network):
+  // both print PASS with their reason codes even without credentials.
+  try {
+    runOfflinePurposeRefGates();
+  } catch (err) {
+    console.error(err.message ?? String(err));
+    process.exit(1);
+  }
+
   // App HTTP gates run on every invocation (offline, fixture-backed)
   // unless skipped; they tear their server down before the chain gates.
   if (!args.skipApp) {
@@ -414,19 +479,34 @@ async function main() {
   const agent = new Account(agentId, provider, KeyPair.fromString(stored.agentPrivateKey));
   const owner = new Account(signerId, provider, KeyPair.fromString(signerKey));
 
-  async function requestAsAgent(payee, amountNear, vendor) {
+  async function requestAsAgent(payee, amountNear, vendor, purposeRef = SUITE_DEFAULTS.purposeRef) {
     const outcome = await agent.callFunctionRaw({
       contractId: guardId,
       methodName: "request_payment",
       args: {
         payee,
         amount_yocto: nearToYoctoString(amountNear, "amount"),
-        purpose_ref: SUITE_DEFAULTS.purposeRef,
+        purpose_ref: purposeRef,
         vendor,
       },
       gas: CALL_GAS,
     });
     return { tx: txHashOf(outcome), result: getTransactionLastResult(outcome) };
+  }
+
+  async function registerEphemeralRef(refId, vendor, payee, maxNear) {
+    const outcome = await owner.callFunctionRaw({
+      contractId: guardId,
+      methodName: "register_purpose_ref",
+      args: {
+        ref_id: refId,
+        vendor,
+        payee,
+        max_amount_yocto: nearToYoctoString(maxNear, "max"),
+      },
+      gas: CALL_GAS,
+    });
+    return txHashOf(outcome);
   }
 
   async function submitFixtureVerdict(requestId, consistent) {
@@ -452,6 +532,18 @@ async function main() {
     `attestation=verifier:${suiteKey.publicKeyBase58} sig:${signatureBase58.slice(0, 8)}`;
 
   try {
+    // Ephemeral refs isolate the new purpose-ref live gates from the
+    // seeded book state (prior runs commit/paid amounts on invoice-114):
+    // a held ref bound to the attacker payee with the poisoned vendor,
+    // and a twice ref bound to the good payee for the double-spend.
+    const runTag = Date.now().toString(36);
+    const heldRefId = `suite-held-${runTag}`;
+    const twiceRefId = `suite-twice-${runTag}`;
+    await registerEphemeralRef(heldRefId, SUITE_DEFAULTS.poisonedVendor, attackerPayee, "30");
+    console.log(`fixture ephemeral ref: ${heldRefId} vendor=${SUITE_DEFAULTS.poisonedVendor} payee=${attackerPayee}`);
+    await registerEphemeralRef(twiceRefId, SUITE_DEFAULTS.cleanVendor, goodPayee, "5");
+    console.log(`fixture ephemeral ref: ${twiceRefId} vendor=${SUITE_DEFAULTS.cleanVendor} payee=${goodPayee}`);
+
     // Gate 1: 20 NEAR clears the 10 NEAR per-payment cap probe — above the
     // cap, inside the daily allowance and the 30 NEAR invoice-114 cap, so
     // the cap check fires first.
@@ -491,13 +583,16 @@ async function main() {
     }
 
     // Gate 3: poisoned vendor to an allowlisted attacker payee stages, then
-    // the fixture verdict (consistent=false) holds it.
+    // the fixture verdict (consistent=false) holds it. The held ref is
+    // bound to the attacker payee with the poisoned vendor so the new
+    // payee/vendor checks pass and the judge path still holds.
     {
       const def = GATE_DEFS[2];
       const { tx, result } = await requestAsAgent(
         attackerPayee,
         SUITE_DEFAULTS.stagedNear,
         SUITE_DEFAULTS.poisonedVendor,
+        heldRefId,
       );
       const requestId = assertRequestId(result?.request_id);
       const { verdictTx, signatureBase58 } = await submitFixtureVerdict(requestId, false);
@@ -561,6 +656,50 @@ async function main() {
           verdictTx,
           extra: `${attestationExtra(signatureBase58)} balance_delta=${payeeDelta}`,
         }),
+      );
+    }
+
+    // Gate 5: right invoice, wrong payee — an allowlisted attacker payee
+    // cites invoice-114 bound to the good payee.
+    {
+      const wrongDef = GATE_DEFS[5];
+      const { tx, result } = await requestAsAgent(
+        attackerPayee,
+        SUITE_DEFAULTS.allowlistProbeNear,
+        SUITE_DEFAULTS.cleanVendor,
+      );
+      const requestId = assertRequestId(result?.request_id);
+      const storedReq = await getRequest(provider, guardId, requestId);
+      if (storedReq.status !== "rejected" || storedReq.reason !== "PurposeRefPayeeMismatch") {
+        throw new Error(
+          `Gate wrong-payee failed: request ${requestId} is ${storedReq.status}/${storedReq.reason}.`,
+        );
+      }
+      console.log(
+        `${formatGateLine(wrongDef, { requestId, tx })} reason=PurposeRefPayeeMismatch PASS`,
+      );
+    }
+
+    // Gate 6: same invoice twice — the second payment is above what is
+    // left of the twice ref (5 max, 3 committed, 3 requested).
+    {
+      const def = GATE_DEFS[4];
+      const first = await requestAsAgent(goodPayee, "3", SUITE_DEFAULTS.cleanVendor, twiceRefId);
+      const firstId = assertRequestId(first.result?.request_id);
+      const firstStored = await getRequest(provider, guardId, firstId);
+      if (firstStored.status !== "staged") {
+        throw new Error(`Gate same-invoice-twice setup failed: request ${firstId} is ${firstStored.status}.`);
+      }
+      const { tx, result } = await requestAsAgent(goodPayee, "3", SUITE_DEFAULTS.cleanVendor, twiceRefId);
+      const requestId = assertRequestId(result?.request_id);
+      const storedReq = await getRequest(provider, guardId, requestId);
+      if (storedReq.status !== "rejected" || storedReq.reason !== "ExceedsPurposeRefRemaining") {
+        throw new Error(
+          `Gate same-invoice-twice failed: request ${requestId} is ${storedReq.status}/${storedReq.reason}.`,
+        );
+      }
+      console.log(
+        `${formatGateLine(def, { requestId, tx })} reason=ExceedsPurposeRefRemaining PASS`,
       );
     }
   } catch (err) {

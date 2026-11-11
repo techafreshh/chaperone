@@ -118,6 +118,7 @@ mod tests {
         guard.register_purpose_ref(
             "invoice-114".to_string(),
             "CoreWeave".to_string(),
+            "payee.near".parse().unwrap(),
             U128::from(50 * ONE_NEAR),
         );
         guard.set_verifier(Some(key_base58(&key)));
@@ -466,6 +467,7 @@ mod tests {
         guard.register_purpose_ref(
             "invoice-114".to_string(),
             "CoreWeave".to_string(),
+            "payee.near".parse().unwrap(),
             U128::from(50 * ONE_NEAR),
         );
         set_predecessor("agent.near");

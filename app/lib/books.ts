@@ -3,6 +3,7 @@ import books from "../data/books.json";
 export interface BookEntry {
   id: string;
   vendor: string;
+  payee: string;
   cap_near: string;
 }
 

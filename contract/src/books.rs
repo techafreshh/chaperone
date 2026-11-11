@@ -1,13 +1,29 @@
 use near_sdk::json_types::U128;
 use near_sdk::near;
+use near_sdk::AccountId;
 
 /// On-chain record of a real invoice/order an agent may pay (contract storage).
 #[near(serializers=[borsh, json])]
 #[derive(Clone, Debug, PartialEq)]
 pub struct PurposeRef {
     pub vendor: String,
+    pub payee: AccountId,
     pub max_amount_yocto: U128,
+    pub committed_yocto: U128,
+    pub paid_yocto: U128,
     pub open: bool,
+}
+
+impl PurposeRef {
+    /// Amount still available on the ref: max minus everything staged,
+    /// held, paying (`committed`) or settled (`paid`). Saturates so a
+    /// legacy or rounding breach never underflows.
+    pub fn remaining_yocto(&self) -> u128 {
+        self.max_amount_yocto
+            .0
+            .saturating_sub(self.committed_yocto.0)
+            .saturating_sub(self.paid_yocto.0)
+    }
 }
 
 /// Public read view of a purpose ref, with the ref id attached.
@@ -16,16 +32,25 @@ pub struct PurposeRef {
 pub struct PurposeRefView {
     pub ref_id: String,
     pub vendor: String,
+    pub payee: AccountId,
     pub max_amount_yocto: U128,
+    pub committed_yocto: U128,
+    pub paid_yocto: U128,
+    pub remaining_yocto: U128,
     pub open: bool,
 }
 
 impl PurposeRefView {
     pub fn new(ref_id: String, r: &PurposeRef) -> Self {
+        let remaining = r.remaining_yocto();
         Self {
             ref_id,
             vendor: r.vendor.clone(),
+            payee: r.payee.clone(),
             max_amount_yocto: r.max_amount_yocto,
+            committed_yocto: r.committed_yocto,
+            paid_yocto: r.paid_yocto,
+            remaining_yocto: U128::from(remaining),
             open: r.open,
         }
     }
@@ -68,6 +93,7 @@ mod tests {
         guard.register_purpose_ref(
             "invoice-114".to_string(),
             "CoreWeave".to_string(),
+            "payee.near".parse().unwrap(),
             U128::from(30_000_000_000_000_000_000_000_000u128),
         );
 
@@ -76,11 +102,15 @@ mod tests {
             .expect("ref must be registered");
         assert_eq!(view.ref_id, "invoice-114");
         assert_eq!(view.vendor, "CoreWeave");
+        assert_eq!(view.payee.as_str(), "payee.near");
         assert!(view.open);
         assert_eq!(
             view.max_amount_yocto.0.to_string(),
             "30000000000000000000000000"
         );
+        assert_eq!(view.committed_yocto, U128::from(0));
+        assert_eq!(view.paid_yocto, U128::from(0));
+        assert_eq!(view.remaining_yocto, view.max_amount_yocto);
     }
 
     #[test]
@@ -89,6 +119,7 @@ mod tests {
         guard.register_purpose_ref(
             "invoice-114".to_string(),
             "CoreWeave".to_string(),
+            "payee.near".parse().unwrap(),
             U128::from(30_000_000_000_000_000_000_000_000u128),
         );
 
@@ -113,11 +144,13 @@ mod tests {
         guard.register_purpose_ref(
             "invoice-114".to_string(),
             "CoreWeave".to_string(),
+            "payee.near".parse().unwrap(),
             U128::from(30_000_000_000_000_000_000_000_000u128),
         );
         guard.register_purpose_ref(
             "order-7".to_string(),
             "Lambda".to_string(),
+            "other.near".parse().unwrap(),
             U128::from(1_000_000_000_000_000_000_000_000u128),
         );
 
@@ -135,11 +168,13 @@ mod tests {
         guard.register_purpose_ref(
             "invoice-114".to_string(),
             "CoreWeave".to_string(),
+            "payee.near".parse().unwrap(),
             U128::from(30_000_000_000_000_000_000_000_000u128),
         );
         guard.register_purpose_ref(
             "invoice-114".to_string(),
             "CoreWeave".to_string(),
+            "payee.near".parse().unwrap(),
             U128::from(30_000_000_000_000_000_000_000_000u128),
         );
     }
@@ -157,6 +192,7 @@ mod tests {
         guard.register_purpose_ref(
             "invoice-114".to_string(),
             "CoreWeave".to_string(),
+            "payee.near".parse().unwrap(),
             U128::from(30_000_000_000_000_000_000_000_000u128),
         );
 
@@ -165,6 +201,7 @@ mod tests {
             guard.register_purpose_ref(
                 "invoice-999".to_string(),
                 "Evil".to_string(),
+                "evil.near".parse().unwrap(),
                 U128::from(1u128),
             );
         }));
@@ -182,6 +219,7 @@ mod tests {
         guard.register_purpose_ref(
             "invoice-114".to_string(),
             "CoreWeave".to_string(),
+            "payee.near".parse().unwrap(),
             U128::from(30_000_000_000_000_000_000_000_000u128),
         );
 

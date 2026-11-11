@@ -77,6 +77,87 @@ describe("request_payment", () => {
     expect(body.status).toBe("staged");
     expect(body.request_id).toBe(7);
   });
+
+  it("rejects a second allowlisted payee on a bound ref", async () => {
+    const store = createFixtureStore();
+    store.agents.get("agent-1")?.payee_allowlist.push("evil.near");
+    const adapter = createFixtureAdapter(store);
+    const result = await requestPayment(
+      {
+        agent_id: "agent-1",
+        payee: "evil.near",
+        amount_near: "1",
+        purpose_ref: "invoice-114",
+        vendor: "CoreWeave",
+      },
+      { env: {}, adapter },
+    );
+    expect(result.isError).toBeUndefined();
+    const body = result.structuredContent as Record<string, unknown>;
+    expect(body.status).toBe("rejected");
+    expect(body.reason).toBe("PurposeRefPayeeMismatch");
+  });
+
+  it("rejects a vendor case mismatch", async () => {
+    const result = await requestPayment(
+      {
+        payee: "good.near",
+        amount_near: "1",
+        purpose_ref: "invoice-114",
+        vendor: "Coreweave",
+      },
+      deps(),
+    );
+    expect(result.isError).toBeUndefined();
+    const body = result.structuredContent as Record<string, unknown>;
+    expect(body.status).toBe("rejected");
+    expect(body.reason).toBe("PurposeRefVendorMismatch");
+  });
+
+  it("rejects a second payment above what is left", async () => {
+    const store = createFixtureStore();
+    const adapter = createFixtureAdapter(store);
+    // order-009 caps at 5 NEAR: 10 NEAR fits the agent cap but not the ref.
+    const over = await requestPayment(
+      {
+        agent_id: "agent-1",
+        payee: "good.near",
+        amount_near: "10",
+        purpose_ref: "order-009",
+        vendor: "Nebius",
+      },
+      { env: {}, adapter },
+    );
+    expect((over.structuredContent as Record<string, unknown>).status).toBe("rejected");
+    expect((over.structuredContent as Record<string, unknown>).reason).toBe("ExceedsPurposeRefRemaining");
+    // invoice-114 holds 20 NEAR remaining after the seeded commit: three
+    // 5 NEAR stages leave 5, so a final 10 NEAR exceeds what is left.
+    for (let i = 0; i < 3; i += 1) {
+      const staged = await requestPayment(
+        {
+          agent_id: "agent-1",
+          payee: "good.near",
+          amount_near: "5",
+          purpose_ref: "invoice-114",
+          vendor: "CoreWeave",
+        },
+        { env: {}, adapter },
+      );
+      expect((staged.structuredContent as Record<string, unknown>).status).toBe("staged");
+    }
+    const second = await requestPayment(
+      {
+        agent_id: "agent-1",
+        payee: "good.near",
+        amount_near: "10",
+        purpose_ref: "invoice-114",
+        vendor: "CoreWeave",
+      },
+      { env: {}, adapter },
+    );
+    expect((second.structuredContent as Record<string, unknown>).status).toBe("rejected");
+    expect((second.structuredContent as Record<string, unknown>).reason).toBe("ExceedsPurposeRefRemaining");
+  });
 });
 
 describe("pending", () => {
