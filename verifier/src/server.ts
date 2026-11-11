@@ -789,24 +789,39 @@ export function createVerifyHandler(
             body: { error: judged.reason, request_id: requestId },
           };
         }
-        recordJudgeOutcome({
-          verified: false,
-          reason: judged.recordReason,
-          model: judgeModelId,
-          fixture: true,
-        });
-        return {
-          status: 502,
-          body: { error: judged.reason, request_id: requestId },
-        };
+        // Failing closed: an unparseable model verdict (re-asked up to
+        // 5 times inside `judgeModel`) holds the payment instead of
+        // leaving it staged. Bind failures stay 502 with no submission.
+        if (judged.recordReason.startsWith("judge:")) {
+          consistent = false;
+          objection = judged.reason;
+          filtered = false;
+          chatId = "";
+          requestHash = "";
+          responseHash = "";
+          signature = "";
+          signingAddress = "";
+        } else {
+          recordJudgeOutcome({
+            verified: false,
+            reason: judged.recordReason,
+            model: judgeModelId,
+            fixture: true,
+          });
+          return {
+            status: 502,
+            body: { error: judged.reason, request_id: requestId },
+          };
+        }
+      } else {
+        consistent = judged.consistent;
+        objection = judged.objection;
+        chatId = judged.chatId;
+        requestHash = judged.requestHash;
+        responseHash = judged.responseHash;
+        signature = judged.signature;
+        signingAddress = judged.signingAddress;
       }
-      consistent = judged.consistent;
-      objection = judged.objection;
-      chatId = judged.chatId;
-      requestHash = judged.requestHash;
-      responseHash = judged.responseHash;
-      signature = judged.signature;
-      signingAddress = judged.signingAddress;
     }
 
     // Evidence bundle (canonical JSON, sorted keys, no whitespace): the

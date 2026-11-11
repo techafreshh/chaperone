@@ -358,6 +358,34 @@ describe("createVerifyHandler local fixture path", () => {
     );
   });
 
+  it("fails closed to held after 5 unparseable re-asks", async () => {
+    cloud = await startFixtureCloud({ malformedContent: true });
+    const keys = resolveVerifierKeys();
+    const inner = new InMemoryChain({
+      verifierPublicKey: keys.publicKeyBytes,
+    });
+    const { adapter, submissions } = spyAdapter(inner);
+    const handle = createVerifyHandler({
+      chain: adapter,
+      resolvedKeys: keys,
+      cloudBaseUrl: cloud.url,
+      model: cloud.model,
+      expectedAddresses: [cloud.walletAddress],
+    });
+    const result = await handle({ request_id: 5 });
+    expect(result.status).toBe(200);
+    expect(result.body).toMatchObject({
+      consistent: false,
+      request_id: 5,
+    });
+    expect(String((result.body as Record<string, unknown>).objection ?? "")).toMatch(
+      /not a JSON consistency verdict/,
+    );
+    expect(submissions).toHaveLength(1);
+    expect(submissions[0]?.consistent).toBe(false);
+    expect((await inner.getRequest(5))?.status).toBe("held");
+  });
+
   it("rejects a verdict signed for another contract id", async () => {
     const keys = resolveVerifierKeys();
     const inner = new InMemoryChain({

@@ -210,6 +210,23 @@ describe("judgeModel against the fixture cloud", () => {
     expect(result.transportError).not.toBe(true);
   });
 
+  it("re-asks malformed output 5 times before refusing", async () => {
+    cloud = await startFixtureCloud({ malformedContent: true });
+    let calls = 0;
+    const counting: typeof fetch = (async (input, init) => {
+      calls += 1;
+      return fetch(input, init);
+    }) as typeof fetch;
+    const result = await judgeModel({
+      baseUrl: cloud.url,
+      model: cloud.model,
+      request: REQUEST,
+      fetchImpl: counting,
+    });
+    expect(result.ok).toBe(false);
+    expect(calls).toBe(5);
+  });
+
   it("maps transport failures to transportError", async () => {
     const result = await judgeModel({
       baseUrl: cloud?.url ?? "http://127.0.0.1:1",

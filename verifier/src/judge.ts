@@ -31,6 +31,10 @@ export interface JudgeModelOptions {
   apiKey?: string;
   request: JudgeRequestInput;
   fetchImpl?: typeof fetch;
+  // Re-asks on unparseable model output before refusing. Transport
+  // failures never retry (no evidence exists to re-ask for). Defaults
+  // to 5 so a single garbled completion cannot hold up the verdict.
+  maxAttempts?: number;
 }
 
 export type JudgeResult =
@@ -238,74 +242,87 @@ export async function judgeModel(
   if (model === "") {
     return { ok: false, reason: "model is required", model };
   }
+  const maxAttempts = opts.maxAttempts ?? 5;
   const fetchImpl = opts.fetchImpl ?? fetch;
   const base = normalizeCloudBaseUrl(opts.baseUrl);
   const body = { model, messages: buildJudgePrompt(opts.request) };
   const requestText = JSON.stringify(body);
-  let response: Response;
-  try {
-    response = await fetchImpl(`${base}/v1/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-        "Accept-Encoding": "identity",
-        ...(opts.apiKey !== undefined && opts.apiKey !== ""
-          ? { Authorization: `Bearer ${opts.apiKey}` }
-          : {}),
-      },
-      body: requestText,
-      signal: AbortSignal.timeout(60_000),
-    });
-  } catch (error) {
+  let lastUnparseableReason = "model output is not a JSON consistency verdict";
+  for (let attempt = 1; attempt <= Math.max(1, maxAttempts); attempt += 1) {
+    let response: Response;
+    try {
+      response = await fetchImpl(`${base}/v1/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+          "Accept-Encoding": "identity",
+          ...(opts.apiKey !== undefined && opts.apiKey !== ""
+            ? { Authorization: `Bearer ${opts.apiKey}` }
+            : {}),
+        },
+        body: requestText,
+        signal: AbortSignal.timeout(60_000),
+      });
+    } catch (error) {
+      return {
+        ok: false,
+        reason: `chat completion request failed: ${error instanceof Error ? error.message : String(error)}`,
+        transportError: true,
+        model,
+      };
+    }
+    if (!response.ok) {
+      return {
+        ok: false,
+        reason: `chat completion request failed: status ${response.status}`,
+        transportError: true,
+        model,
+      };
+    }
+    const responseText = await response.text();
+    const requestHash = sha256HexText(requestText);
+    const responseHash = sha256HexText(responseText);
+    const chatId = extractChatId(responseText);
+    if (chatId === null) {
+      lastUnparseableReason = "chat completion response has no id";
+      if (attempt >= Math.max(1, maxAttempts)) {
+        return { ok: false, reason: lastUnparseableReason, model };
+      }
+      continue;
+    }
+    let content: unknown;
+    try {
+      const parsed = JSON.parse(responseText) as {
+        choices?: Array<{ message?: { content?: unknown } }>;
+      };
+      content = parsed.choices?.[0]?.message?.content;
+    } catch {
+      content = undefined;
+    }
+    const parsed = parseConsistent(content);
+    if (parsed.consistent === undefined) {
+      lastUnparseableReason = "model output is not a JSON consistency verdict";
+      if (attempt >= Math.max(1, maxAttempts)) {
+        return {
+          ok: false,
+          reason: lastUnparseableReason,
+          model,
+        };
+      }
+      continue;
+    }
     return {
-      ok: false,
-      reason: `chat completion request failed: ${error instanceof Error ? error.message : String(error)}`,
-      transportError: true,
+      ok: true,
+      consistent: parsed.consistent,
+      ...(parsed.objection !== undefined ? { objection: parsed.objection } : {}),
+      chatId,
+      requestText,
+      responseText,
+      requestHash,
+      responseHash,
       model,
     };
   }
-  if (!response.ok) {
-    return {
-      ok: false,
-      reason: `chat completion request failed: status ${response.status}`,
-      transportError: true,
-      model,
-    };
-  }
-  const responseText = await response.text();
-  const requestHash = sha256HexText(requestText);
-  const responseHash = sha256HexText(responseText);
-  const chatId = extractChatId(responseText);
-  if (chatId === null) {
-    return { ok: false, reason: "chat completion response has no id", model };
-  }
-  let content: unknown;
-  try {
-    const parsed = JSON.parse(responseText) as {
-      choices?: Array<{ message?: { content?: unknown } }>;
-    };
-    content = parsed.choices?.[0]?.message?.content;
-  } catch {
-    content = undefined;
-  }
-  const parsed = parseConsistent(content);
-  if (parsed.consistent === undefined) {
-    return {
-      ok: false,
-      reason: "model output is not a JSON consistency verdict",
-      model,
-    };
-  }
-  return {
-    ok: true,
-    consistent: parsed.consistent,
-    ...(parsed.objection !== undefined ? { objection: parsed.objection } : {}),
-    chatId,
-    requestText,
-    responseText,
-    requestHash,
-    responseHash,
-    model,
-  };
+  return { ok: false, reason: lastUnparseableReason, model };
 }
