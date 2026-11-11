@@ -3,10 +3,13 @@ import { getReceipts } from "../../lib/receipts";
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-// Server-rendered receipts waterfall: one per-agent section per `agent_id`
-// with every paid receipt as a `receipt-row`, plus plain-HTML audit-pack
-// download links, so every probe string is in the first HTML byte stream
-// with zero client JS.
+// Server-rendered receipts waterfall (issue #63 sample-data honesty):
+// one per-agent section per `agent_id` with every paid receipt as a
+// `receipt-row`, plus plain-HTML audit-pack download links, so every
+// probe string is in the first HTML byte stream with zero client JS.
+// Fixture rows carry no signature strings: their signature/tx cells show
+// `sample data`, and every fixture/stub row carries a visible
+// `sample data` tag with its `source`.
 export default async function ReceiptsPage() {
   const receipts = await getReceipts();
   const agentIds = [...new Set(receipts.map((row) => row.agent_id))].sort();
@@ -45,8 +48,19 @@ export default async function ReceiptsPage() {
                   <td>{row.payee}</td>
                   <td>{row.amount_yocto}</td>
                   <td>{row.status}</td>
-                  <td>{row.verdict_signature}</td>
-                  <td>{row.chain_tx}</td>
+                  <td>
+                    {row.source === "fixture"
+                      ? "sample data"
+                      : row.verdict_signature}
+                  </td>
+                  <td>
+                    {row.source === "fixture" ? "sample data" : row.chain_tx}
+                  </td>
+                  {row.source === "fixture" || row.source === "stub" ? (
+                    <td>
+                      <span>sample data</span>
+                    </td>
+                  ) : null}
                 </tr>
               ))}
             </tbody>

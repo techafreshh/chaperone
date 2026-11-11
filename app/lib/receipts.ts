@@ -8,13 +8,24 @@
 // Yocto amounts stay decimal strings end-to-end. `verdict_signature` and
 // `chain_tx` are always emitted per entry; when no source provides them
 // the value is `""` (honest absence, never a synthesized id). Fixture
-// signature/tx values are labeled display placeholders, not live
-// evidence (same honesty rule as the #14/#15 fixtures).
+// rows carry no signature strings (issue #63): their signature/tx fields
+// stay `""` and the pages render `sample data` instead.
 
 import { NextResponse } from "next/server";
 import fs from "node:fs";
 import { getMirrorStatus } from "./supabase";
 import type { Env } from "./env";
+
+export type ReceiptSource = "chain" | "mirror" | "stub" | "fixture";
+
+export function isReceiptSource(value: unknown): value is ReceiptSource {
+  return (
+    value === "chain" ||
+    value === "mirror" ||
+    value === "stub" ||
+    value === "fixture"
+  );
+}
 
 export interface ReceiptRow {
   request_id: number;
@@ -27,12 +38,14 @@ export interface ReceiptRow {
   reason?: string | null;
   verdict_signature: string;
   chain_tx: string;
+  source: ReceiptSource;
 }
 
 export const RECEIPTS_STUB_FILE = "RECEIPTS_STUB_FILE";
 export const REQUESTS_STUB_FILE_KEY = "REQUESTS_STUB_FILE";
 
-export const RECEIPTS_CSV_HEADER = "request_id,status,verdict_signature,chain_tx";
+export const RECEIPTS_CSV_HEADER =
+  "request_id,status,verdict_signature,chain_tx,source";
 
 // On-chain payout vocabulary (mirrors `contract/src/request.rs`): the
 // waterfall and audit pack stay paid-only, but the normalizer
@@ -43,11 +56,11 @@ export const STATUS_PAID = "paid";
 export const STATUS_PAYING = "paying";
 export const STATUS_FAILED = "failed";
 
-// Fixture tier (labeled display data, never live evidence): exactly 3
+// Fixture tier (issue #63 sample data, never live evidence): exactly 3
 // paid rows for `agent-1` (ids 7-9, chosen to avoid colliding with the
 // #14 fixture ids 1-3 and the #15 queue fixture ids 5-6). Signature/tx
-// values are labeled placeholders so the default deployment carries the
-// acceptance probe strings with zero credentials.
+// fields stay `""` (honest absence) so no fixture row claims a live
+// signature; the pages and CSV label them `sample data` / `fixture`.
 export const FIXTURE_RECEIPTS: ReceiptRow[] = [
   {
     request_id: 9,
@@ -58,8 +71,9 @@ export const FIXTURE_RECEIPTS: ReceiptRow[] = [
     vendor: "CoreWeave",
     status: "paid",
     reason: null,
-    verdict_signature: "fixture-sig-9",
-    chain_tx: "fixture-tx-9",
+    verdict_signature: "",
+    chain_tx: "",
+    source: "fixture",
   },
   {
     request_id: 8,
@@ -70,8 +84,9 @@ export const FIXTURE_RECEIPTS: ReceiptRow[] = [
     vendor: "CoreWeave",
     status: "paid",
     reason: null,
-    verdict_signature: "fixture-sig-8",
-    chain_tx: "fixture-tx-8",
+    verdict_signature: "",
+    chain_tx: "",
+    source: "fixture",
   },
   {
     request_id: 7,
@@ -82,8 +97,9 @@ export const FIXTURE_RECEIPTS: ReceiptRow[] = [
     vendor: "CoreWeave",
     status: "paid",
     reason: null,
-    verdict_signature: "fixture-sig-7",
-    chain_tx: "fixture-tx-7",
+    verdict_signature: "",
+    chain_tx: "",
+    source: "fixture",
   },
 ];
 
@@ -172,6 +188,7 @@ export function normalizeReceiptRow(
     chain_tx:
       firstString(raw, ["chain_tx", "tx_hash", "transaction_hash", "txHash"]) ??
       "",
+    source: isReceiptSource(raw.source) ? raw.source : "fixture",
   };
 }
 
@@ -203,6 +220,7 @@ export function loadStubReceipts(
             : null,
         )
         .filter((row): row is ReceiptRow => row !== null)
+        .map((row) => ({ ...row, source: "stub" as const }))
         .sort((a, b) => b.request_id - a.request_id);
       return rows;
     } catch {
@@ -278,7 +296,8 @@ export async function loadMirrorReceipts(
         : null,
     )
     .filter((row): row is ReceiptRow => row !== null)
-    .filter((row) => row.status === STATUS_PAID);
+    .filter((row) => row.status === STATUS_PAID)
+    .map((row) => ({ ...row, source: "mirror" as const }));
   return { state: "ready", receipts };
 }
 
@@ -365,7 +384,8 @@ export async function loadChainReceipts(
         : null,
     )
     .filter((row): row is ReceiptRow => row !== null)
-    .filter((row) => row.status === STATUS_PAID);
+    .filter((row) => row.status === STATUS_PAID)
+    .map((row) => ({ ...row, source: "chain" as const }));
   return { state: "ready", receipts };
 }
 
@@ -384,14 +404,14 @@ export async function getReceipts(
   const stub = loadStubReceipts(env);
   if (stub !== null) {
     for (const row of stub) {
-      merged.set(row.request_id, { ...row });
+      merged.set(row.request_id, { ...row, source: "stub" as const });
     }
   }
   try {
     const mirror = await loadMirrorReceipts(fetchImpl, env);
     if (mirror.state === "ready") {
       for (const row of mirror.receipts) {
-        merged.set(row.request_id, { ...row });
+        merged.set(row.request_id, { ...row, source: "mirror" as const });
       }
     }
   } catch {
@@ -401,7 +421,7 @@ export async function getReceipts(
     const chain = await loadChainReceipts(fetchImpl, env);
     if (chain.state === "ready") {
       for (const row of chain.receipts) {
-        merged.set(row.request_id, { ...row });
+        merged.set(row.request_id, { ...row, source: "chain" as const });
       }
     }
   } catch {
@@ -415,16 +435,17 @@ export async function getReceipts(
   return [...FIXTURE_RECEIPTS].sort((a, b) => b.request_id - a.request_id);
 }
 
-function csvEscape(value: string): string {
+function csvEscape(value: unknown): string {
+  const text = typeof value === "string" ? value : String(value ?? "");
   if (
-    value.includes(",") ||
-    value.includes('"') ||
-    value.includes("\n") ||
-    value.includes("\r")
+    text.includes(",") ||
+    text.includes('"') ||
+    text.includes("\n") ||
+    text.includes("\r")
   ) {
-    return `"${value.replace(/"/g, '""')}"`;
+    return `"${text.replace(/"/g, '""')}"`;
   }
-  return value;
+  return text;
 }
 
 export function receiptsToCsv(rows: ReceiptRow[]): string {
@@ -436,6 +457,7 @@ export function receiptsToCsv(rows: ReceiptRow[]): string {
         row.status,
         row.verdict_signature,
         row.chain_tx,
+        (row as { source?: unknown }).source ?? "fixture",
       ]
         .map(csvEscape)
         .join(","),
@@ -445,9 +467,10 @@ export function receiptsToCsv(rows: ReceiptRow[]): string {
 }
 
 // Shared `GET /api/audit/export` handler: `format=json` (or absent)
-// answers 200 with the full receipt objects; `format=csv` answers 200
-// `text/csv` with the 4-column audit header plus one row per receipt;
-// any other `format` answers 400.
+// answers 200 with the full receipt objects (each carrying `source`);
+// `format=csv` answers 200 `text/csv` with the 5-column audit header
+// (`request_id,status,verdict_signature,chain_tx,source`) plus one row per
+// receipt; any other `format` answers 400.
 export async function handleAuditExportGet(
   request: Request,
   deps: { fetchImpl?: typeof fetch; env?: Env } = {},

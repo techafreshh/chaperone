@@ -66,8 +66,8 @@ function stubRow(request_id: number, extra: Record<string, unknown> = {}) {
   };
 }
 
-describe("fixture tier", () => {
-  it("yields exactly 3 paid agent-1 receipts with signature and tx", async () => {
+describe("fixture tier (issue #63 sample data)", () => {
+  it("yields exactly 3 paid agent-1 receipts with no signature strings and fixture source", async () => {
     const receipts = await getReceipts({
       fetchImpl: throwingFetch(),
       env: EMPTY_ENV,
@@ -78,8 +78,9 @@ describe("fixture tier", () => {
       expect(row.agent_id).toBe("agent-1");
       expect(row.status).toBe("paid");
       expect(typeof row.request_id).toBe("number");
-      expect(row.verdict_signature).not.toBe("");
-      expect(row.chain_tx).not.toBe("");
+      expect(row.verdict_signature).toBe("");
+      expect(row.chain_tx).toBe("");
+      expect(row.source).toBe("fixture");
     }
     expect(receipts.map((row) => row.request_id)).toEqual([9, 8, 7]);
   });
@@ -233,7 +234,7 @@ describe("loadChainReceipts", () => {
 });
 
 describe("handleAuditExportGet", () => {
-  it("JSON answers a 200 array where each entry carries the audit keys", async () => {
+  it("JSON answers a 200 array where each entry carries the audit keys plus source", async () => {
     const res = await handleAuditExportGet(
       new Request("http://localhost/api/audit/export?format=json"),
       { fetchImpl: throwingFetch(), env: EMPTY_ENV },
@@ -246,6 +247,7 @@ describe("handleAuditExportGet", () => {
       expect(entry).toHaveProperty("request_id");
       expect(entry).toHaveProperty("verdict_signature");
       expect(entry).toHaveProperty("chain_tx");
+      expect(entry).toHaveProperty("source", "fixture");
     }
   });
 
@@ -260,7 +262,7 @@ describe("handleAuditExportGet", () => {
     expect(body).toHaveLength(3);
   });
 
-  it("CSV answers text/csv with the exact header plus 3 data rows", async () => {
+  it("CSV answers text/csv with the source header plus 3 fixture data rows", async () => {
     const res = await handleAuditExportGet(
       new Request("http://localhost/api/audit/export?format=csv"),
       { fetchImpl: throwingFetch(), env: EMPTY_ENV },
@@ -270,8 +272,14 @@ describe("handleAuditExportGet", () => {
     const text = await res.text();
     const lines = text.trim().split("\n");
     expect(lines[0]).toBe(RECEIPTS_CSV_HEADER);
+    expect(lines[0]).toBe("request_id,status,verdict_signature,chain_tx,source");
     expect(lines[0]).toContain("request_id,status,verdict_signature,chain_tx");
+    expect(lines[0]).toContain("source");
     expect(lines).toHaveLength(4);
+    for (const line of lines.slice(1)) {
+      expect(line.endsWith(",fixture")).toBe(true);
+    }
+    expect(text).not.toContain("fixture-sig-");
   });
 
   it("an unknown format answers 400", async () => {
@@ -289,20 +297,24 @@ describe("handleAuditExportGet", () => {
         verdict_signature: 'a,"b',
         chain_tx: "c",
         status: "paid",
-      },
+        source: "stub",
+      } as unknown as Parameters<typeof receiptsToCsv>[0][number],
     ]);
     expect(csv.split("\n")[0]).toBe(RECEIPTS_CSV_HEADER);
     expect(csv).toContain('"a,""b"');
   });
 });
 
-describe("receipts page probe strings", () => {
-  it("renders agent-1 plus 3 receipt-row markers", async () => {
+describe("receipts page probe strings (issue #63)", () => {
+  it("renders agent-1 plus 3 receipt-row markers with sample data and no signatures", async () => {
     const html = renderToStaticMarkup(await ReceiptsPage());
     expect(html).toContain("<h1>Receipts</h1>");
     expect(html).toContain("agent-1");
     expect(html.match(/data-testid="receipt-row"/g)).toHaveLength(3);
     expect(html).toContain("/api/audit/export?format=json");
     expect(html).toContain("/api/audit/export?format=csv");
+    expect(html).toContain("sample data");
+    expect(html).not.toContain("fixture-sig-");
+    expect(html).not.toContain("TEE-verified");
   });
 });
