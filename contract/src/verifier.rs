@@ -300,6 +300,11 @@ mod tests {
         assert_eq!(guard.fleet_summary().pending_queue, 0);
     }
 
+    // Note: the `#[private]` guard on `on_payout` is enforced by the
+    // macro-generated WASM wrapper, so host unit tests cannot observe it
+    // (direct Rust calls bypass the wrapper). The sandbox round trip
+    // asserts it on-chain instead: a direct `on_payout` call fails with
+    // "Method on_payout is private" instead of settling.
     #[test]
     #[should_panic(expected = "Request is not paying")]
     fn settle_non_paying_request_panics() {

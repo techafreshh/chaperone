@@ -333,6 +333,20 @@ async function main() {
       );
     }
 
+    // The private settlement callback rejects direct calls: only the
+    // contract itself (via the transfer receipt) may settle. Request 999
+    // does not exist, so "Request not found" would prove the guard is
+    // missing — "is private" proves it fired first.
+    try {
+      await root.call(contract, "on_payout", { request_id: 999 });
+      throw new Error("Sandbox privacy failed: direct on_payout call succeeded.");
+    } catch (err) {
+      if (!/is private/.test(err?.message ?? String(err))) {
+        throw new Error(`Sandbox privacy failed: unexpected on_payout error ${err?.message ?? err}.`);
+      }
+      console.log("sandbox payout: direct on_payout rejected as private");
+    }
+
     // Gate A: consistent verdict pays 2 NEAR for real.
     {
       const payeeBefore = await viewNativeBalance(payee);
