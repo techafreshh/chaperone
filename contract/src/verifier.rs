@@ -1,27 +1,50 @@
 use crate::request::PaymentRequest;
+use near_sdk::AccountId;
 
 /// Domain separator prefixing every signed verdict payload (PRD §10.1).
-pub(crate) const VERDICT_DOMAIN: &str = "chaperone-verdict-v1";
+pub(crate) const VERDICT_DOMAIN: &str = "chaperone-verdict-v2";
+
+/// Panic message for `submit_verdict` evidence hashes that are not 32
+/// bytes encoded as 64 lowercase-or-uppercase hex chars.
+pub(crate) const REASON_INVALID_EVIDENCE: &str = "Invalid evidence sha256";
+
+/// Append one variable-length field: its byte length as `le_u32` followed
+/// by the raw bytes (PRD §10.1).
+fn push_len_prefixed(payload: &mut Vec<u8>, bytes: &[u8]) {
+    payload.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+    payload.extend_from_slice(bytes);
+}
 
 /// Canonical verdict payload the verifier signs (PRD §10.1, byte-stable):
-/// `domain || le_u64(id) || agent || payee || le_u128(amount) || ref || byte`
-/// with `verdict_byte` 1 for consistent, 0 for inconsistent.
+/// `domain || le_u32(len(contract)) || contract || le_u64(id) ||
+/// le_u32(len(agent)) || agent || le_u32(len(payee)) || payee ||
+/// le_u128(amount) || le_u32(len(ref)) || ref || sha256(memo) ||
+/// evidence_sha256 || byte` with `verdict_byte` 1 for consistent, 0 for
+/// inconsistent. Binding the contract id stops a verdict from being
+/// replayed against another deployment; binding the memo and evidence
+/// hashes stops it from being reused for another reason or proof.
 pub(crate) fn canonical_verdict_payload(
     request: &PaymentRequest,
+    contract_id: &AccountId,
+    evidence_sha256: &[u8; 32],
     consistent: bool,
 ) -> Vec<u8> {
     let mut payload = Vec::with_capacity(
-        VERDICT_DOMAIN.len() + 8 + request.agent_id.as_str().len() + request.payee.as_str().len()
-            + 16
-            + request.purpose_ref.len()
-            + 1,
+        VERDICT_DOMAIN.len() + 4 + contract_id.as_str().len() + 8
+            + 4 + request.agent_id.as_str().len()
+            + 4 + request.payee.as_str().len()
+            + 16 + 4 + request.purpose_ref.len()
+            + 32 + 32 + 1,
     );
     payload.extend_from_slice(VERDICT_DOMAIN.as_bytes());
+    push_len_prefixed(&mut payload, contract_id.as_str().as_bytes());
     payload.extend_from_slice(&request.request_id.to_le_bytes());
-    payload.extend_from_slice(request.agent_id.as_str().as_bytes());
-    payload.extend_from_slice(request.payee.as_str().as_bytes());
+    push_len_prefixed(&mut payload, request.agent_id.as_str().as_bytes());
+    push_len_prefixed(&mut payload, request.payee.as_str().as_bytes());
     payload.extend_from_slice(&request.amount_yocto.0.to_le_bytes());
-    payload.extend_from_slice(request.purpose_ref.as_bytes());
+    push_len_prefixed(&mut payload, request.purpose_ref.as_bytes());
+    payload.extend_from_slice(&near_sdk::env::sha256(request.memo.as_bytes()));
+    payload.extend_from_slice(evidence_sha256);
     payload.push(if consistent { 1u8 } else { 0u8 });
     payload
 }
@@ -42,6 +65,35 @@ pub(crate) fn decode_signature(signature_base58: &str) -> [u8; 64] {
         .into_vec()
         .expect("Invalid verdict signature");
     decoded.try_into().expect("Invalid verdict signature")
+}
+
+/// Hex-decodes a submitted evidence hash; panics unless it is 32 bytes.
+pub(crate) fn decode_evidence_sha256(evidence_hex: &str) -> [u8; 32] {
+    let bytes = hex_decode_32(evidence_hex).expect(REASON_INVALID_EVIDENCE);
+    bytes
+}
+
+fn hex_val(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn hex_decode_32(hex: &str) -> Option<[u8; 32]> {
+    let bytes = hex.as_bytes();
+    if bytes.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for i in 0..32 {
+        let hi = hex_val(bytes[2 * i])?;
+        let lo = hex_val(bytes[2 * i + 1])?;
+        out[i] = (hi << 4) | lo;
+    }
+    Some(out)
 }
 
 pub(crate) use crate::events::{
@@ -120,6 +172,7 @@ mod tests {
             "CoreWeave".to_string(),
             "payee.near".parse().unwrap(),
             U128::from(50 * ONE_NEAR),
+            "Test invoice description".to_string(),
         );
         guard.set_verifier(Some(key_base58(&key)));
         fund_treasury(&mut guard, 100 * ONE_NEAR);
@@ -130,6 +183,7 @@ mod tests {
                 U128::from(5 * ONE_NEAR),
                 "invoice-114".to_string(),
                 "CoreWeave".to_string(),
+                "Test payment memo".to_string(),
             );
             assert_eq!(outcome.status, "staged");
         }
@@ -140,8 +194,22 @@ mod tests {
         let request = guard
             .get_request(request_id)
             .expect("request must exist");
-        let payload = canonical_verdict_payload(&request, consistent);
+        let payload = canonical_verdict_payload(
+            &request,
+            &near_sdk::env::current_account_id(),
+            &test_evidence(),
+            consistent,
+        );
         bs58::encode(key.sign(&payload).to_bytes()).into_string()
+    }
+
+    /// Evidence bytes shared by every v2 signature in this module: the
+    /// same 32 bytes the script-updated `submit_verdict` calls below
+    /// submit as hex, so payload and submission always agree.
+    fn test_evidence() -> [u8; 32] {
+        decode_evidence_sha256(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
     }
 
     #[test]
@@ -153,25 +221,35 @@ mod tests {
             amount_yocto: U128::from(5 * ONE_NEAR),
             purpose_ref: "invoice-114".to_string(),
             vendor: "CoreWeave".to_string(),
+            memo: "GPU hours, October 2026".to_string(),
             status: "staged".to_string(),
             reason: None,
         };
-        let payload = canonical_verdict_payload(&request, true);
+        let contract_id: AccountId = "guard.testnet".parse().unwrap();
+        let evidence = test_evidence();
+        let payload = canonical_verdict_payload(&request, &contract_id, &evidence, true);
 
         let mut expected = Vec::new();
-        expected.extend_from_slice(b"chaperone-verdict-v1");
+        expected.extend_from_slice(b"chaperone-verdict-v2");
+        expected.extend_from_slice(&(13u32).to_le_bytes());
+        expected.extend_from_slice(b"guard.testnet");
         expected.extend_from_slice(&1u64.to_le_bytes());
+        expected.extend_from_slice(&(10u32).to_le_bytes());
         expected.extend_from_slice(b"agent.near");
+        expected.extend_from_slice(&(10u32).to_le_bytes());
         expected.extend_from_slice(b"payee.near");
         expected.extend_from_slice(&(5 * ONE_NEAR).to_le_bytes());
+        expected.extend_from_slice(&(11u32).to_le_bytes());
         expected.extend_from_slice(b"invoice-114");
+        expected.extend_from_slice(&near_sdk::env::sha256("GPU hours, October 2026".as_bytes()));
+        expected.extend_from_slice(&evidence);
         expected.push(1u8);
 
         assert_eq!(payload, expected);
-        assert_eq!(payload.len(), 20 + 8 + 10 + 10 + 16 + 11 + 1);
-        // Domain separator leads; id follows it; verdict byte trails.
-        assert_eq!(&payload[..20], b"chaperone-verdict-v1");
-        assert_eq!(&payload[20..28], &1u64.to_le_bytes());
+        // 20 + (4+13) + 8 + (4+10) + (4+10) + 16 + (4+11) + 32 + 32 + 1
+        assert_eq!(payload.len(), 20 + 17 + 8 + 14 + 14 + 16 + 15 + 32 + 32 + 1);
+        // Domain separator leads; verdict byte trails.
+        assert_eq!(&payload[..20], b"chaperone-verdict-v2");
         assert_eq!(payload[payload.len() - 1], 1u8);
     }
 
@@ -179,8 +257,10 @@ mod tests {
     fn verdict_byte_differs_by_consistency_only() {
         let (guard, _) = staged_guard();
         let request = guard.get_request(1).expect("request must exist");
-        let yes = canonical_verdict_payload(&request, true);
-        let no = canonical_verdict_payload(&request, false);
+        let contract_id = near_sdk::env::current_account_id();
+        let evidence = test_evidence();
+        let yes = canonical_verdict_payload(&request, &contract_id, &evidence, true);
+        let no = canonical_verdict_payload(&request, &contract_id, &evidence, false);
         assert_eq!(yes.len(), no.len());
         assert_eq!(&yes[..yes.len() - 1], &no[..no.len() - 1]);
         assert_eq!(yes[yes.len() - 1], 1u8);
@@ -241,7 +321,7 @@ mod tests {
         let (mut guard, key) = staged_guard();
         set_predecessor("anyone.near");
         let sig = sign_as(&key, &guard, 2, true);
-        guard.submit_verdict(2, true, sig);
+        guard.submit_verdict(2, true, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(), sig);
         // Funded: `staged -> paying`, treasury debited at once; the
         // private `on_payout` callback settles `paid` later.
         let stored = guard.get_request(2).expect("request must exist");
@@ -261,7 +341,7 @@ mod tests {
         let (mut guard, key) = staged_guard();
         set_predecessor("anyone.near");
         let sig = sign_as(&key, &guard, 2, true);
-        guard.submit_verdict(2, true, sig);
+        guard.submit_verdict(2, true, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(), sig);
         guard.settle_payout(2, true);
         let stored = guard.get_request(2).expect("request must exist");
         assert_eq!(stored.status, "paid");
@@ -282,7 +362,7 @@ mod tests {
         let (mut guard, key) = staged_guard();
         set_predecessor("anyone.near");
         let sig = sign_as(&key, &guard, 2, true);
-        guard.submit_verdict(2, true, sig);
+        guard.submit_verdict(2, true, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(), sig);
         assert_eq!(
             guard.treasury(),
             U128::from(100 * ONE_NEAR - 5 * ONE_NEAR)
@@ -327,7 +407,7 @@ mod tests {
 
         set_predecessor("anyone.near");
         let sig = sign_as(&key, &guard, 2, true);
-        guard.submit_verdict(2, true, sig);
+        guard.submit_verdict(2, true, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(), sig);
         let stored = guard.get_request(2).expect("request must exist");
         assert_eq!(stored.status, "held");
         assert_eq!(stored.reason, Some("InsufficientTreasury".to_string()));
@@ -342,7 +422,7 @@ mod tests {
     fn approve_hold_without_funds_panics_then_pays_after_top_up() {
         let (mut guard, key) = staged_guard();
         set_predecessor("anyone.near");
-        guard.submit_verdict(3, false, sign_as(&key, &guard, 3, false));
+        guard.submit_verdict(3, false, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(), sign_as(&key, &guard, 3, false));
         assert_eq!(
             guard.get_request(3).expect("request must exist").status,
             "held"
@@ -386,7 +466,7 @@ mod tests {
         let (mut guard, key) = staged_guard();
         set_predecessor("anyone.near");
         let sig = sign_as(&key, &guard, 3, false);
-        guard.submit_verdict(3, false, sig);
+        guard.submit_verdict(3, false, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(), sig);
 
         let stored = guard.get_request(3).expect("request must exist");
         assert_eq!(stored.status, "held");
@@ -397,7 +477,7 @@ mod tests {
 
         // Paid/staged requests never appear in the queue.
         let paid_sig = sign_as(&key, &guard, 2, true);
-        guard.submit_verdict(2, true, paid_sig);
+        guard.submit_verdict(2, true, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(), paid_sig);
         let queue = guard.list_queue();
         assert_eq!(queue.len(), 1);
         assert_eq!(queue[0].request_id, 3);
@@ -410,7 +490,7 @@ mod tests {
         // A non-owner, non-agent caller posts the verdict.
         set_predecessor("stranger.near");
         let sig = sign_as(&key, &guard, 1, true);
-        guard.submit_verdict(1, true, sig);
+        guard.submit_verdict(1, true, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(), sig);
         assert_eq!(
             guard.get_request(1).expect("request must exist").status,
             "paying"
@@ -422,7 +502,7 @@ mod tests {
         let (mut guard, key) = staged_guard();
         set_predecessor("anyone.near");
         let hold_sig = sign_as(&key, &guard, 3, false);
-        guard.submit_verdict(3, false, hold_sig);
+        guard.submit_verdict(3, false, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(), hold_sig);
         assert_eq!(
             guard.get_request(3).expect("request must exist").status,
             "held"
@@ -431,7 +511,7 @@ mod tests {
         // Signature from an unregistered key over the same payload.
         let bad_sig = sign_as(&other_signing_key(), &guard, 3, false);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            guard.submit_verdict(3, false, bad_sig);
+            guard.submit_verdict(3, false, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(), bad_sig);
         }));
         assert!(result.is_err(), "wrong-key verdict must panic");
         assert_eq!(
@@ -448,10 +528,15 @@ mod tests {
         // Sign a payload for a different amount than the stored request.
         let mut tampered = guard.get_request(2).expect("request must exist");
         tampered.amount_yocto = U128::from(6 * ONE_NEAR);
-        let payload = canonical_verdict_payload(&tampered, true);
+        let payload = canonical_verdict_payload(
+            &tampered,
+            &near_sdk::env::current_account_id(),
+            &test_evidence(),
+            true,
+        );
         let sig = bs58::encode(key.sign(&payload).to_bytes()).into_string();
         set_predecessor("anyone.near");
-        guard.submit_verdict(2, true, sig);
+        guard.submit_verdict(2, true, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(), sig);
     }
 
     #[test]
@@ -469,6 +554,7 @@ mod tests {
             "CoreWeave".to_string(),
             "payee.near".parse().unwrap(),
             U128::from(50 * ONE_NEAR),
+            "Test invoice description".to_string(),
         );
         set_predecessor("agent.near");
         guard.request_payment(
@@ -476,9 +562,10 @@ mod tests {
             U128::from(ONE_NEAR),
             "invoice-114".to_string(),
             "CoreWeave".to_string(),
+            "Test payment memo".to_string(),
         );
         set_predecessor("anyone.near");
-        guard.submit_verdict(1, true, bs58::encode([1u8; 64]).into_string());
+        guard.submit_verdict(1, true, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(), bs58::encode([1u8; 64]).into_string());
     }
 
     #[test]
@@ -487,9 +574,9 @@ mod tests {
         let (mut guard, key) = staged_guard();
         set_predecessor("anyone.near");
         let sig = sign_as(&key, &guard, 2, true);
-        guard.submit_verdict(2, true, sig.clone());
+        guard.submit_verdict(2, true, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(), sig.clone());
         // Second verdict on the now-paid request must fail.
-        guard.submit_verdict(2, true, sig);
+        guard.submit_verdict(2, true, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(), sig);
     }
 
     #[test]
@@ -498,7 +585,7 @@ mod tests {
         let (mut guard, key) = staged_guard();
         let _ = key;
         set_predecessor("anyone.near");
-        guard.submit_verdict(99, true, bs58::encode([1u8; 64]).into_string());
+        guard.submit_verdict(99, true, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(), bs58::encode([1u8; 64]).into_string());
     }
 
     #[test]
@@ -513,7 +600,7 @@ mod tests {
 
         // One hold: only the held request counts toward pending.
         set_predecessor("anyone.near");
-        guard.submit_verdict(1, false, sign_as(&key, &guard, 1, false));
+        guard.submit_verdict(1, false, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(), sign_as(&key, &guard, 1, false));
         assert_eq!(guard.fleet_summary().pending_queue, 1);
         let queue = guard.list_queue();
         assert_eq!(queue.len(), 1);
@@ -524,7 +611,7 @@ mod tests {
         );
 
         // A paying sibling stays out of the queue with the staged one.
-        guard.submit_verdict(2, true, sign_as(&key, &guard, 2, true));
+        guard.submit_verdict(2, true, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(), sign_as(&key, &guard, 2, true));
         assert_eq!(
             guard.get_request(2).expect("request must exist").status,
             "paying"
@@ -537,7 +624,7 @@ mod tests {
         assert_eq!(guard.list_queue()[0].request_id, 1);
 
         // A second hold raises pending to two; owner decisions drain it.
-        guard.submit_verdict(3, false, sign_as(&key, &guard, 3, false));
+        guard.submit_verdict(3, false, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(), sign_as(&key, &guard, 3, false));
         assert_eq!(guard.fleet_summary().pending_queue, 2);
 
         set_predecessor(OWNER);
@@ -559,8 +646,8 @@ mod tests {
     fn approve_hold_starts_payout_and_reject_hold_releases_spend() {
         let (mut guard, key) = staged_guard();
         set_predecessor("anyone.near");
-        guard.submit_verdict(2, false, sign_as(&key, &guard, 2, false));
-        guard.submit_verdict(3, false, sign_as(&key, &guard, 3, false));
+        guard.submit_verdict(2, false, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(), sign_as(&key, &guard, 2, false));
+        guard.submit_verdict(3, false, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(), sign_as(&key, &guard, 3, false));
         assert_eq!(guard.list_queue().len(), 2);
 
         set_predecessor(OWNER);
@@ -597,7 +684,7 @@ mod tests {
     fn second_hold_decision_on_terminal_state_panics() {
         let (mut guard, key) = staged_guard();
         set_predecessor("anyone.near");
-        guard.submit_verdict(2, false, sign_as(&key, &guard, 2, false));
+        guard.submit_verdict(2, false, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(), sign_as(&key, &guard, 2, false));
 
         set_predecessor(OWNER);
         guard.approve_hold(2);
@@ -616,7 +703,7 @@ mod tests {
     fn non_owner_hold_decisions_panic() {
         let (mut guard, key) = staged_guard();
         set_predecessor("anyone.near");
-        guard.submit_verdict(2, false, sign_as(&key, &guard, 2, false));
+        guard.submit_verdict(2, false, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(), sign_as(&key, &guard, 2, false));
 
         set_predecessor("mallory.near");
         let approve = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -632,5 +719,116 @@ mod tests {
             guard.get_request(2).expect("request must exist").status,
             "held"
         );
+    }
+
+    fn v1_payload(request: &PaymentRequest, consistent: bool) -> Vec<u8> {
+        // The pre-v2 layout: domain-v1 || id || agent || payee || amount || ref || byte.
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"chaperone-verdict-v1");
+        payload.extend_from_slice(&request.request_id.to_le_bytes());
+        payload.extend_from_slice(request.agent_id.as_str().as_bytes());
+        payload.extend_from_slice(request.payee.as_str().as_bytes());
+        payload.extend_from_slice(&request.amount_yocto.0.to_le_bytes());
+        payload.extend_from_slice(request.purpose_ref.as_bytes());
+        payload.push(if consistent { 1u8 } else { 0u8 });
+        payload
+    }
+
+    #[test]
+    #[should_panic(expected = "Invalid verdict signature")]
+    fn v1_signature_is_rejected_under_v2() {
+        let (mut guard, key) = staged_guard();
+        let request = guard.get_request(2).expect("request must exist");
+        let sig = bs58::encode(key.sign(&v1_payload(&request, true)).to_bytes()).into_string();
+        set_predecessor("anyone.near");
+        guard.submit_verdict(2, true, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(), sig);
+    }
+
+    #[test]
+    #[should_panic(expected = "Invalid verdict signature")]
+    fn verdict_for_another_contract_is_rejected() {
+        let (mut guard, key) = staged_guard();
+        let request = guard.get_request(2).expect("request must exist");
+        // Signed for contract A while this guard runs as another id:
+        // the contract-id binding must refuse the replay.
+        let other: AccountId = "contract-a.testnet".parse().unwrap();
+        let payload = canonical_verdict_payload(&request, &other, &test_evidence(), true);
+        let sig = bs58::encode(key.sign(&payload).to_bytes()).into_string();
+        set_predecessor("anyone.near");
+        guard.submit_verdict(2, true, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(), sig);
+    }
+
+    #[test]
+    fn identical_requests_on_two_contracts_bind_apart() {
+        // Same verifier key, identical stored requests, different contract
+        // ids: a signature verifies only on the deployment it was made
+        // for. (The mock store is shared per test, so each deployment
+        // uses its own agent/ref names; the treasury is empty, so an
+        // accepted consistent verdict holds with `InsufficientTreasury`.)
+        let key = signing_key();
+        let key58 = key_base58(&key);
+        let evidence = test_evidence();
+        let evidence_hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string();
+        let mut guard = Guard::new(owner_id());
+        for (tag, contract) in [("a", "contract-a.testnet"), ("b", "contract-b.testnet")] {
+            let agent: AccountId = format!("agent-{tag}.near").parse().unwrap();
+            let ref_id = format!("invoice-{tag}");
+            let context = VMContextBuilder::new()
+                .predecessor_account_id(OWNER.parse().unwrap())
+                .current_account_id(contract.parse().unwrap())
+                .build();
+            testing_env!(context);
+            guard.register_agent(
+                agent.clone(),
+                U128::from(50 * ONE_NEAR),
+                U128::from(50 * ONE_NEAR),
+                vec!["payee.near".parse().unwrap()],
+            );
+            guard.register_purpose_ref(
+                ref_id.clone(),
+                "CoreWeave".to_string(),
+                "payee.near".parse().unwrap(),
+                U128::from(50 * ONE_NEAR),
+                "Test invoice description".to_string(),
+            );
+            guard.set_verifier(Some(key58.clone()));
+            let context = VMContextBuilder::new()
+                .predecessor_account_id(agent.clone())
+                .current_account_id(contract.parse().unwrap())
+                .build();
+            testing_env!(context);
+            let outcome = guard.request_payment(
+                "payee.near".parse().unwrap(),
+                U128::from(5 * ONE_NEAR),
+                ref_id.clone(),
+                "CoreWeave".to_string(),
+                "Test payment memo".to_string(),
+            );
+            assert_eq!(outcome.status, "staged");
+            let record = guard.get_request(outcome.request_id).expect("stored");
+            let payload = canonical_verdict_payload(&record, &contract.parse().unwrap(), &evidence, true);
+            let sig = bs58::encode(key.sign(&payload).to_bytes()).into_string();
+            let context = VMContextBuilder::new()
+                .predecessor_account_id("anyone.near".parse().unwrap())
+                .current_account_id(contract.parse().unwrap())
+                .build();
+            testing_env!(context);
+            guard.submit_verdict(outcome.request_id, true, evidence_hex.clone(), sig);
+            // Accepted on its own deployment (held: no treasury funds).
+            let stored = guard.get_request(outcome.request_id).expect("stored");
+            assert_eq!(stored.status, "held");
+            assert_eq!(
+                stored.reason,
+                Some("InsufficientTreasury".to_string())
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "Invalid evidence sha256")]
+    fn malformed_evidence_hex_is_rejected() {
+        let (mut guard, key) = staged_guard();
+        set_predecessor("anyone.near");
+        guard.submit_verdict(2, true, "not-hex".to_string(), sign_as(&key, &guard, 2, true));
     }
 }
