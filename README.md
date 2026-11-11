@@ -43,7 +43,7 @@ Open `http://localhost:3000/fleet` in your browser. `GET /api/health` returns `{
 What those two commands do:
 
 - `scripts/deploy-testnet.sh --dry-run` (the default mode) prints `cargo build` → contract deploy → `register_agent` × 4 → `seed-books` → `provision-agents` → `list_agents` assertion with zero mutation. Add `--sandbox` for the offline `near-workspaces` round trip, or `--live` (with `NEAR_ACCOUNT_ID`/`NEAR_PRIVATE_KEY` set) to execute against testnet for real.
-- `scripts/attack-suite.sh` asserts `GET /api/health` → `{"ok": true}`, `GET /fleet` holds agents `agent-1` through `agent-4`, `GET /requests` shows a `TEE-verified` row, and `GET /api/audit/export?format=csv` starts with `request_id,status,verdict_signature,chain_tx` — then runs `cargo test -p chaperone-guard`. On-chain gates (3 blocked attacks + 1 clean transit) run too when credentials are present, and print `SKIP` otherwise. Every flag is documented via `scripts/attack-suite.sh --help`.
+- `scripts/attack-suite.sh` asserts `GET /api/health` → `{"ok": true}`, `GET /fleet` holds agents `agent-1` through `agent-4` labeled `sample data`, `GET /requests` shows `sample data` rows with no `TEE-verified` text, and `GET /api/audit/export?format=csv` starts with `request_id,status,verdict_signature,chain_tx` plus a `source` column where offline rows read `fixture` — then runs `cargo test -p chaperone-guard`. On-chain gates (3 blocked attacks + 1 clean transit) run too when credentials are present, and print `SKIP` otherwise. Every flag is documented via `scripts/attack-suite.sh --help`.
 
 ## Usage
 
@@ -51,10 +51,10 @@ What those two commands do:
 
 | Route | What it shows |
 |---|---|
-| `/fleet` | The 4-agent fleet and per-agent state (tiers: live chain, fixture, stub file, disabled). `frozen` renders only when the chain view says `active: false`, or on a row visibly labeled `fixture`. |
-| `/requests` | Payment requests with binary-honest attestation chips: `TEE-verified`, `unverifiable`, or `deterministic-only`. |
+| `/fleet` | The 4-agent fleet and per-agent state (tiers: live chain, mirror, stub file, fixture). `frozen` renders only when the chain view says `active: false`, or on a row visibly labeled `sample data`. Offline rows carry `source: fixture/stub` and show a `sample data` tag. |
+| `/requests` | Payment requests with binary-honest attestation chips: `TEE-verified` (only for chain/mirror rows backed by a verified preflight and a signature bound to that request id), `attestation unverifiable`, or `deterministic-only`. Offline fixture/stub rows show `sample data` and never render `TEE-verified`. |
 | `/queue` | Held requests awaiting one-click approve/reject. Rows stay `held` until the next chain read returns `paid`. |
-| `/receipts` | Receipt waterfall plus the CSV audit export. |
+| `/receipts` | Receipt waterfall plus the CSV audit export. Offline fixture receipts show `sample data` instead of signature strings; the CSV carries a `source` column (`fixture` offline). |
 | `/verify` | Live judged-verdict entry point (`POST /verify`). |
 | `/settings` | Guard contract binding and verifier key configuration. |
 
@@ -63,12 +63,12 @@ What those two commands do:
 The app server holds no owner key and sends no owner transactions. Every owner method (`approve_hold`, `reject_hold`, `set_agent_active`, `set_verifier`, `register_agent`, `set_agent_policy`) is sent from the browser through the operator's NEAR wallet (MyNearWallet or Meteor via `@near-wallet-selector`); the contract's owner check is the only authorization. After a wallet transaction the UI re-reads chain state and shows the result with a testnet explorer link to the transaction. On error it shows the error and changes nothing. Agent key revocation stays an operator CLI (`scripts/revoke-key.sh`); the UI kill switch is the on-chain freeze.
 
 - **Live tier** (`GUARD_CONTRACT_ID` set): connect the owner wallet, click Approve/Reject/Freeze/Revive/Rotate — the wallet signs the `FunctionCall` to the guard contract. The server's owner-write routes answer `403 {"error":"sign with the owner wallet"}` and send nothing.
-- **Fixture tier** (no contract id): the same buttons act on the in-memory fixture so the flow is clickable with zero credentials, and every row they change is visibly labeled `fixture`.
+- **Fixture tier** (no contract id): the same buttons act on the in-memory fixture so the flow is clickable with zero credentials, and every row they change is visibly labeled `sample data`.
 
 ### APIs
 
 - `GET /api/health` → `{"ok": true}` (quickstart health assertion).
-- `GET /api/audit/export?format=csv` → receipts CSV starting with `request_id,status,verdict_signature,chain_tx`.
+- `GET /api/audit/export?format=csv` → receipts CSV starting with `request_id,status,verdict_signature,chain_tx` plus a `source` column (`fixture` for offline sample rows).
 - `POST /api/queue/[id]/approve` and `POST /api/queue/[id]/reject` — human decision on held requests. Fixture tier: applies the in-memory overlay (`200 {"status":"paid"}` / `{"status":"rejected"}`). Live tier: `403 {"error":"sign with the owner wallet"}` — sign `approve_hold` / `reject_hold` with the owner wallet instead.
 - `POST /api/agents/[id]/kill` (on-chain freeze) and `POST /api/agents/[id]/revive`. Fixture tier: flips the in-memory overlay (`200 {"active":false}` / `{"active":true}`). Live tier: `403 {"error":"sign with the owner wallet"}` — sign `set_agent_active` with the owner wallet instead.
 - `POST /api/agents` / `PATCH /api/agents` — agent registry/policy writes. Fixture tier only; live tier answers `403 {"error":"sign with the owner wallet"}` — sign `register_agent` / `set_agent_policy` with the owner wallet instead.
@@ -130,7 +130,7 @@ The money path is one way: agent sub-accounts hold only function-call keys scope
 
 - **Sandbox vs live.** Merge-tier verification is deterministic and offline: `--dry-run` prints command sequences, `--sandbox` replays deploy → 4 agents → staged transit → kill-switch against a local `near-workspaces` sandbox (never testnet, never the faucet). Live testnet runs only via explicit `--live` flags with operator credentials.
 - **Faucet is an operator step.** Real testnet funding (faucet top-up, signer transfers, real-deploy receipts and tx hashes) happens post-merge by the operator and is recorded outside the repo — never baked into the tree.
-- **TEE-degradation honesty.** Without a live attestation the UI shows `unverifiable` or `deterministic-only`, never `TEE-verified`. Fixture rows (fleet agents, request badges, receipt signatures) are display placeholders carrying the probe strings with zero credentials — never synthesized evidence.
+- **TEE-degradation honesty.** Without a live attestation the UI shows `sample data` with `deterministic-only` (or `attestation unverifiable`), never `TEE-verified`. Offline fixture/stub rows are labeled sample data on every page (`source: fixture/stub`); fixture receipts show `sample data` instead of signature strings, and `TEE-verified` renders only for chain/mirror rows backed by a verified preflight and a signature bound to that request id — never from fixture data.
 - **Roadmap, not product:** live mainnet deployment, automated faucet funding in CI, video or submission paperwork. See [`.agents/PRDs/PRD.md`](./.agents/PRDs/PRD.md) for the full product picture.
 
 ## Validation

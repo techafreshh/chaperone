@@ -203,11 +203,17 @@ export function isAlreadyRegisteredMessage(message) {
 // Audit-pack CSV header the app gates assert, byte-identical to
 // `RECEIPTS_CSV_HEADER` in `app/lib/receipts.ts` (that module is the
 // source of truth; this copy exists because a `.mjs` runner cannot import
-// TypeScript, and the app's own `receipts.test.ts` guards drift).
-export const RECEIPTS_CSV_HEADER = "request_id,status,verdict_signature,chain_tx";
+// TypeScript, and the app's own `receipts.test.ts` guards drift). The
+// header carries the `source` column (issue #63); gates assert the legacy
+// prefix plus `source` and `fixture` rows.
+export const RECEIPTS_CSV_HEADER =
+  "request_id,status,verdict_signature,chain_tx,source";
+export const RECEIPTS_CSV_HEADER_PREFIX =
+  "request_id,status,verdict_signature,chain_tx";
 
-// App-gate pages every run probes (issue #21): each must answer 200, and
-// `/requests` must carry a `TEE-verified` row from the fixture tier.
+// App-gate pages every run probes (issue #63): each must answer 200;
+// `/requests` must carry no `TEE-verified` text and every fixture/stub row
+// must carry a visible `sample data` tag.
 export const APP_GATE_PAGES = ["/fleet", "/requests", "/queue", "/receipts"];
 
 // Suite defaults: the guard agent under test, its per-payment cap headroom
