@@ -31,7 +31,49 @@ export const GATE_DEFS = [
   { key: "allowlist", label: "allowlist", verdict: "BLOCKED" },
   { key: "purpose-mismatch", label: "purpose-mismatch", verdict: "HELD" },
   { key: "clean-transit", label: "clean-transit", verdict: "PAID" },
+  { key: "same-invoice-twice", label: "same-invoice-twice", verdict: "BLOCKED" },
+  { key: "wrong-payee", label: "wrong-payee", verdict: "BLOCKED" },
 ];
+
+export const REASON_PURPOSE_REF_PAYEE_MISMATCH = "PurposeRefPayeeMismatch";
+export const REASON_PURPOSE_REF_VENDOR_MISMATCH = "PurposeRefVendorMismatch";
+export const REASON_EXCEEDS_PURPOSE_REF_REMAINING = "ExceedsPurposeRefRemaining";
+
+// Offline fixture replay of the purpose-ref books (issue #61): one ref
+// (`invoice-114`, CoreWeave, bound payee, 50 NEAR max) with committed/paid
+// tracking. Mirrors `PurposeRef::remaining_yocto` and the intake order
+// payee -> vendor -> remaining. Pure so the offline `node:test` suite
+// runs without network.
+export function createPurposeRefLedger({ refId, vendor, payee, maxYocto }) {
+  return {
+    refId,
+    vendor,
+    payee,
+    max: BigInt(maxYocto),
+    committed: 0n,
+    paid: 0n,
+  };
+}
+
+export function purposeRefRemaining(ledger) {
+  const remaining = ledger.max - ledger.committed - ledger.paid;
+  return remaining >= 0n ? remaining : 0n;
+}
+
+export function evaluatePurposeRefRequest(ledger, { payee, vendor, amountYocto }) {
+  const amount = BigInt(amountYocto);
+  if (payee !== ledger.payee) {
+    return { status: "rejected", reason: REASON_PURPOSE_REF_PAYEE_MISMATCH };
+  }
+  if (vendor !== ledger.vendor) {
+    return { status: "rejected", reason: REASON_PURPOSE_REF_VENDOR_MISMATCH };
+  }
+  if (amount > purposeRefRemaining(ledger)) {
+    return { status: "rejected", reason: REASON_EXCEEDS_PURPOSE_REF_REMAINING };
+  }
+  ledger.committed += amount;
+  return { status: "staged", reason: null };
+}
 
 export function gatePrefix(def) {
   return `GATE ${def.label}: ${def.verdict}`;

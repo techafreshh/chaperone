@@ -32,7 +32,9 @@ export const REASON_EXCEEDS_PER_PAYMENT_CAP = "ExceedsPerPaymentCap";
 export const REASON_PAYEE_NOT_ALLOWLISTED = "PayeeNotAllowlisted";
 export const REASON_PURPOSE_REF_NOT_FOUND = "PurposeRefNotFound";
 export const REASON_PURPOSE_REF_CLOSED = "PurposeRefClosed";
-export const REASON_EXCEEDS_PURPOSE_REF_CAP = "ExceedsPurposeRefCap";
+export const REASON_PURPOSE_REF_PAYEE_MISMATCH = "PurposeRefPayeeMismatch";
+export const REASON_PURPOSE_REF_VENDOR_MISMATCH = "PurposeRefVendorMismatch";
+export const REASON_EXCEEDS_PURPOSE_REF_REMAINING = "ExceedsPurposeRefRemaining";
 export const REASON_INSUFFICIENT_TREASURY = "InsufficientTreasury";
 export const REASON_TRANSFER_FAILED = "TransferFailed";
 
@@ -153,12 +155,22 @@ interface FixtureAgent {
 
 interface FixturePurposeRef {
   vendor: string;
+  payee: string;
   max_amount_yocto: string;
+  committed_yocto: string;
+  paid_yocto: string;
   open: boolean;
 }
 
+export function refRemainingYocto(ref: FixturePurposeRef): string {
+  const max = BigInt(ref.max_amount_yocto);
+  const committed = BigInt(ref.committed_yocto);
+  const paid = BigInt(ref.paid_yocto);
+  const remaining = max - committed - paid;
+  return (remaining >= BigInt(0) ? remaining : BigInt(0)).toString();
+}
+
 const NEAR_50 = `5${"0".repeat(25)}`;
-const NEAR_30 = `3${"0".repeat(25)}`;
 const NEAR_12 = `12${"0".repeat(24)}`;
 const NEAR_10 = `1${"0".repeat(25)}`;
 const NEAR_8 = `8${"0".repeat(24)}`;
@@ -220,11 +232,15 @@ export function createFixtureStore(): FixtureStore {
       },
     ],
   ]);
+  // invoice-114 mirrors `app/data/books.json` binding (CoreWeave, 50 NEAR)
+  // with the seeded 6x5 NEAR staged/held requests already committed, so
+  // remaining is 20 NEAR. Other refs start uncommitted.
+  const seededCommitted = (30n * 10n ** 24n).toString();
   const refs = new Map<string, FixturePurposeRef>([
-    ["invoice-114", { vendor: "CoreWeave", max_amount_yocto: NEAR_30, open: true }],
-    ["invoice-115", { vendor: "Lambda", max_amount_yocto: NEAR_12, open: true }],
-    ["order-008", { vendor: "Crusoe", max_amount_yocto: NEAR_8, open: true }],
-    ["order-009", { vendor: "Nebius", max_amount_yocto: NEAR_5, open: true }],
+    ["invoice-114", { vendor: "CoreWeave", payee: "good.near", max_amount_yocto: NEAR_50, committed_yocto: seededCommitted, paid_yocto: "0", open: true }],
+    ["invoice-115", { vendor: "Lambda", payee: "good.near", max_amount_yocto: NEAR_12, committed_yocto: "0", paid_yocto: "0", open: true }],
+    ["order-008", { vendor: "Crusoe", payee: "good.near", max_amount_yocto: NEAR_8, committed_yocto: "0", paid_yocto: "0", open: true }],
+    ["order-009", { vendor: "Nebius", payee: "good.near", max_amount_yocto: NEAR_5, committed_yocto: "0", paid_yocto: "0", open: true }],
   ]);
   const requests = new Map<number, StoredRequest>();
   for (const id of [1, 2, 3, 4, 5]) {
@@ -294,7 +310,8 @@ function agentViewFromFixture(agentId: string, agent: FixtureAgent): AgentView {
 
 // Fixture intake replays the `request_payment` check order in
 // `contract/src/lib.rs`: active -> per-payment cap -> daily allowance ->
-// payee allowlist -> ref exists -> ref open -> ref covers amount.
+// payee allowlist -> ref exists -> ref open -> ref payee -> ref vendor ->
+// ref remaining.
 function fixtureSubmit(
   store: FixtureStore,
   input: RequestPaymentInput,
@@ -337,9 +354,16 @@ function fixtureSubmit(
     return record(STATUS_REJECTED, REASON_PURPOSE_REF_NOT_FOUND);
   }
   if (!ref.open) return record(STATUS_REJECTED, REASON_PURPOSE_REF_CLOSED);
-  if (amount > BigInt(ref.max_amount_yocto)) {
-    return record(STATUS_REJECTED, REASON_EXCEEDS_PURPOSE_REF_CAP);
+  if (input.payee !== ref.payee) {
+    return record(STATUS_REJECTED, REASON_PURPOSE_REF_PAYEE_MISMATCH);
   }
+  if (input.vendor !== ref.vendor) {
+    return record(STATUS_REJECTED, REASON_PURPOSE_REF_VENDOR_MISMATCH);
+  }
+  if (amount > BigInt(refRemainingYocto(ref))) {
+    return record(STATUS_REJECTED, REASON_EXCEEDS_PURPOSE_REF_REMAINING);
+  }
+  ref.committed_yocto = (BigInt(ref.committed_yocto) + amount).toString();
   agent.spent_today_yocto = (BigInt(agent.spent_today_yocto) + amount).toString();
   return record(STATUS_STAGED, null);
 }

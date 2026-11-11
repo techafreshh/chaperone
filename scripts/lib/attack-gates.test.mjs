@@ -2,11 +2,16 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   GATE_DEFS,
+  REASON_EXCEEDS_PURPOSE_REF_REMAINING,
+  REASON_PURPOSE_REF_PAYEE_MISMATCH,
   SUITE_DEFAULTS,
   buildVerdictPayload,
+  createPurposeRefLedger,
+  evaluatePurposeRefRequest,
   formatGateLine,
   gatePrefix,
   isAlreadyRegisteredMessage,
+  purposeRefRemaining,
   resolveGuardId,
   txHashOf,
   waitForRequestStatus,
@@ -30,13 +35,15 @@ describe("resolveGuardId", () => {
 });
 
 describe("gate line contract", () => {
-  it("pins the four exact acceptance prefixes", () => {
+  it("pins the six exact acceptance prefixes", () => {
     const prefixes = GATE_DEFS.map(gatePrefix);
     assert.deepEqual(prefixes, [
       "GATE over-allowance: BLOCKED",
       "GATE allowlist: BLOCKED",
       "GATE purpose-mismatch: HELD",
       "GATE clean-transit: PAID",
+      "GATE same-invoice-twice: BLOCKED",
+      "GATE wrong-payee: BLOCKED",
     ]);
   });
 
@@ -138,6 +145,58 @@ describe("buildVerdictPayload", () => {
       () => buildVerdictPayload({ ...stableRequest(), amount_yocto: (1n << 128n).toString() }, true),
       /out of range/,
     );
+  });
+});
+
+describe("purpose-ref ledger (issue #61)", () => {
+  const NEAR = 10n ** 24n;
+
+  function ledger() {
+    return createPurposeRefLedger({
+      refId: "invoice-114",
+      vendor: "CoreWeave",
+      payee: "a.near",
+      maxYocto: (50n * NEAR).toString(),
+    });
+  }
+
+  it("right invoice, wrong payee yields PurposeRefPayeeMismatch", () => {
+    const out = evaluatePurposeRefRequest(ledger(), {
+      payee: "b.near",
+      vendor: "CoreWeave",
+      amountYocto: (30n * NEAR).toString(),
+    });
+    assert.equal(out.status, "rejected");
+    assert.equal(out.reason, REASON_PURPOSE_REF_PAYEE_MISMATCH);
+    assert.equal(out.reason, "PurposeRefPayeeMismatch");
+  });
+
+  it("same invoice twice: second payment above what is left", () => {
+    const state = ledger();
+    const first = evaluatePurposeRefRequest(state, {
+      payee: "a.near",
+      vendor: "CoreWeave",
+      amountYocto: (30n * NEAR).toString(),
+    });
+    assert.equal(first.status, "staged");
+    assert.equal(purposeRefRemaining(state), 20n * NEAR);
+    const second = evaluatePurposeRefRequest(state, {
+      payee: "a.near",
+      vendor: "CoreWeave",
+      amountYocto: (30n * NEAR).toString(),
+    });
+    assert.equal(second.status, "rejected");
+    assert.equal(second.reason, REASON_EXCEEDS_PURPOSE_REF_REMAINING);
+    assert.equal(second.reason, "ExceedsPurposeRefRemaining");
+  });
+
+  it("vendor compare is an exact string match", () => {
+    const out = evaluatePurposeRefRequest(ledger(), {
+      payee: "a.near",
+      vendor: "Coreweave",
+      amountYocto: NEAR.toString(),
+    });
+    assert.equal(out.reason, "PurposeRefVendorMismatch");
   });
 });
 
