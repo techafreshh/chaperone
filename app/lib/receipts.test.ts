@@ -7,6 +7,9 @@ import ReceiptsPage from "../app/receipts/page";
 import {
   FIXTURE_RECEIPTS,
   RECEIPTS_CSV_HEADER,
+  STATUS_FAILED,
+  STATUS_PAID,
+  STATUS_PAYING,
   getReceipts,
   handleAuditExportGet,
   loadChainReceipts,
@@ -79,6 +82,37 @@ describe("fixture tier", () => {
       expect(row.chain_tx).not.toBe("");
     }
     expect(receipts.map((row) => row.request_id)).toEqual([9, 8, 7]);
+  });
+});
+
+describe("payout status vocabulary", () => {
+  it("pins the on-chain paying/failed strings", () => {
+    expect(STATUS_PAID).toBe("paid");
+    expect(STATUS_PAYING).toBe("paying");
+    expect(STATUS_FAILED).toBe("failed");
+  });
+
+  it("normalizes paying and failed rows without mangling them", () => {
+    const paying = normalizeReceiptRow(stubRow(50, { status: "paying" }));
+    expect(paying?.status).toBe("paying");
+    const failed = normalizeReceiptRow(
+      stubRow(51, { status: "failed", reason: "TransferFailed" }),
+    );
+    expect(failed?.status).toBe("failed");
+    expect(failed?.reason).toBe("TransferFailed");
+  });
+
+  it("keeps the waterfall paid-only when stubs carry paying/failed rows", async () => {
+    const file = writeStubFile([
+      stubRow(60),
+      { ...stubRow(61, { status: "paying" }) },
+      { ...stubRow(62, { status: "failed", reason: "TransferFailed" }) },
+    ]);
+    const receipts = await getReceipts({
+      fetchImpl: throwingFetch(),
+      env: { RECEIPTS_STUB_FILE: file },
+    });
+    expect(receipts.map((row) => row.request_id)).toEqual([60]);
   });
 });
 

@@ -8,6 +8,13 @@ import type { Env } from "./env";
 // payment. Without `SUPABASE_URL`/`SUPABASE_SERVICE_KEY` the mirror is an
 // explicit labeled `disabled` state (503 from the route, never fake rows).
 
+// On-chain payout vocabulary (mirrors `contract/src/request.rs`): the
+// merged feed carries every status verbatim, so `paying` (transfer in
+// flight) and `failed` (bounced transfer, reason `TransferFailed`) flow
+// through with badges like any other row — no filter drops them.
+export const STATUS_PAYING = "paying";
+export const STATUS_FAILED = "failed";
+
 export const MIRROR_HEADER = "x-chaperone-mirror";
 export const MIRROR_DISABLED_REASON =
   "SUPABASE_URL/SUPABASE_SERVICE_KEY not configured";

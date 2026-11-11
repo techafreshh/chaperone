@@ -16,8 +16,14 @@ import { fileURLToPath } from "node:url";
 const HERE = dirname(fileURLToPath(import.meta.url));
 
 export const STATUS_STAGED = "staged";
+// `paying` (transfer in flight) and `failed` (bounced transfer) mirror
+// `contract/src/request.rs`: the tools surface them verbatim, never
+// remap them to `paid` — a request only reads `paid` after the transfer
+// succeeded.
+export const STATUS_PAYING = "paying";
 export const STATUS_HELD = "held";
 export const STATUS_PAID = "paid";
+export const STATUS_FAILED = "failed";
 export const STATUS_REJECTED = "rejected";
 
 export const REASON_AGENT_INACTIVE = "AgentInactive";
@@ -27,6 +33,8 @@ export const REASON_PAYEE_NOT_ALLOWLISTED = "PayeeNotAllowlisted";
 export const REASON_PURPOSE_REF_NOT_FOUND = "PurposeRefNotFound";
 export const REASON_PURPOSE_REF_CLOSED = "PurposeRefClosed";
 export const REASON_EXCEEDS_PURPOSE_REF_CAP = "ExceedsPurposeRefCap";
+export const REASON_INSUFFICIENT_TREASURY = "InsufficientTreasury";
+export const REASON_TRANSFER_FAILED = "TransferFailed";
 
 export const DEFAULT_AGENT_ID = "agent-1";
 

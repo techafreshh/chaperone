@@ -34,6 +34,15 @@ export const REQUESTS_STUB_FILE_KEY = "REQUESTS_STUB_FILE";
 
 export const RECEIPTS_CSV_HEADER = "request_id,status,verdict_signature,chain_tx";
 
+// On-chain payout vocabulary (mirrors `contract/src/request.rs`): the
+// waterfall and audit pack stay paid-only, but the normalizer
+// understands the in-flight and bounced states so `paying` (transfer in
+// flight) and `failed` (bounced transfer, reason `TransferFailed`) rows
+// pass through to consumers instead of being mangled or dropped.
+export const STATUS_PAID = "paid";
+export const STATUS_PAYING = "paying";
+export const STATUS_FAILED = "failed";
+
 // Fixture tier (labeled display data, never live evidence): exactly 3
 // paid rows for `agent-1` (ids 7-9, chosen to avoid colliding with the
 // #14 fixture ids 1-3 and the #15 queue fixture ids 5-6). Signature/tx
@@ -225,7 +234,7 @@ export async function loadMirrorReceipts(
   const serviceKey = env.SUPABASE_SERVICE_KEY as string;
   const endpoint =
     `${status.url}/rest/v1/requests` +
-    `?select=*&status=eq.paid&order=request_id.desc`;
+    `?select=*&status=eq.${STATUS_PAID}&order=request_id.desc`;
   let res: Response;
   try {
     res = await fetchImpl(endpoint, {
@@ -269,7 +278,7 @@ export async function loadMirrorReceipts(
         : null,
     )
     .filter((row): row is ReceiptRow => row !== null)
-    .filter((row) => row.status === "paid");
+    .filter((row) => row.status === STATUS_PAID);
   return { state: "ready", receipts };
 }
 
@@ -356,7 +365,7 @@ export async function loadChainReceipts(
         : null,
     )
     .filter((row): row is ReceiptRow => row !== null)
-    .filter((row) => row.status === "paid");
+    .filter((row) => row.status === STATUS_PAID);
   return { state: "ready", receipts };
 }
 
@@ -400,7 +409,7 @@ export async function getReceipts(
   }
 
   const paid = [...merged.values()]
-    .filter((row) => row.status === "paid")
+    .filter((row) => row.status === STATUS_PAID)
     .sort((a, b) => b.request_id - a.request_id);
   if (paid.length > 0) return paid;
   return [...FIXTURE_RECEIPTS].sort((a, b) => b.request_id - a.request_id);
