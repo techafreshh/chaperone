@@ -31,6 +31,11 @@ export default function KillButton({
       confirmMessage={confirmMessage}
       fallbackUrl={`/api/agents/${agent_id}/${action}`}
       fallbackMethod="POST"
+      className={
+        active
+          ? "rounded bg-red-700 px-3 py-1 text-sm font-semibold text-white hover:bg-red-600 disabled:opacity-50"
+          : "rounded bg-emerald-700 px-3 py-1 text-sm font-semibold text-white hover:bg-emerald-600 disabled:opacity-50"
+      }
     />
   );
 }
