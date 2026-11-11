@@ -12,6 +12,7 @@
 
 import { NextResponse } from "next/server";
 import fs from "node:fs";
+import { getVerdictObjection } from "../../verifier/src/server";
 import { isLiveTier, liveWriteBlocked } from "./guard";
 import { getMirrorStatus } from "./supabase";
 import type { Env } from "./env";
@@ -23,6 +24,8 @@ export interface QueueRow {
   amount_yocto: string;
   purpose_ref: string;
   vendor: string;
+  memo: string;
+  description: string;
   status: string;
   reason?: string | null;
   objection?: string | null;
@@ -42,7 +45,8 @@ export const REASON_HOLD_REJECTED = "HoldRejected";
 // Fixture tier (labeled display data, never live evidence): held request 6
 // with the probe's `reason mismatch` objection from an active agent, plus a
 // held row from the frozen `agent-3` so the default page carries the
-// `agent frozen` banner.
+// `agent frozen` banner. Memos and invoice descriptions ride along so the
+// queue shows memo, description and objection side by side.
 export const FIXTURE_QUEUE_REQUESTS: QueueRow[] = [
   {
     request_id: 6,
@@ -51,6 +55,8 @@ export const FIXTURE_QUEUE_REQUESTS: QueueRow[] = [
     amount_yocto: "5000000000000000000000000",
     purpose_ref: "invoice-114",
     vendor: "CoreWeave",
+    memo: "Annual domain renewal",
+    description: "GPU hours, October 2026",
     status: "held",
     reason: "reason mismatch",
     active: true,
@@ -62,6 +68,8 @@ export const FIXTURE_QUEUE_REQUESTS: QueueRow[] = [
     amount_yocto: "5000000000000000000000000",
     purpose_ref: "invoice-114",
     vendor: "CoreWeave",
+    memo: "GPU hours, October 2026",
+    description: "GPU hours, October 2026",
     status: "held",
     reason: "purpose mismatch",
     active: false,
@@ -164,6 +172,9 @@ function normalizeQueueRow(raw: Record<string, unknown>): QueueRow | null {
           ? (raw.purposeRef as string)
           : "",
     vendor: typeof raw.vendor === "string" ? raw.vendor : "",
+    memo: typeof raw.memo === "string" ? raw.memo : "",
+    description:
+      typeof raw.description === "string" ? raw.description : "",
     status,
     reason,
     objection,
@@ -415,6 +426,37 @@ export async function loadChainQueue(
     const live = liveness.get(row.agent_id);
     if (live !== undefined) row.active = row.active && live;
   }
+  // Enrich chain rows so the queue shows memo, invoice description and
+  // objection side by side: memo rides the `get_request` view, the
+  // description comes from `get_purpose_ref` (best-effort), and the
+  // objection is judge-side memory (the contract stores none).
+  const descriptions = new Map<string, string>();
+  for (const row of rows) {
+    if (row.purpose_ref !== "" && !descriptions.has(row.purpose_ref)) {
+      try {
+        const raw = await rpcCallQueue(fetchImpl, rpcUrl, contractId, "get_purpose_ref", {
+          ref_id: row.purpose_ref,
+        });
+        const description =
+          raw !== null && typeof raw === "object"
+            ? (raw as Record<string, unknown>).description
+            : undefined;
+        descriptions.set(
+          row.purpose_ref,
+          typeof description === "string" ? description : "",
+        );
+      } catch {
+        descriptions.set(row.purpose_ref, "");
+      }
+    }
+  }
+  for (const row of rows) {
+    if (row.description === "") {
+      row.description = descriptions.get(row.purpose_ref) ?? "";
+    }
+    const recorded = getVerdictObjection(row.request_id);
+    if (recorded !== null) row.objection = recorded;
+  }
   return { state: "ready", requests: rows };
 }
 
@@ -505,10 +547,15 @@ export async function getQueueState(
   // Propagate per-agent frozen-wins across request ids: any source that
   // marks an agent inactive freezes all of its rows. Skipped for rows
   // the chain owns when the chain tier is ready (chain wins above).
+  // Judge-side objections merge last: the contract stores none on held
+  // rows, so the verifier's latest objection is authoritative wherever
+  // the row came from.
   for (const row of merged.values()) {
     if (chainReady && chainRows.has(row.request_id)) continue;
     const live = agentLiveness.get(row.agent_id);
     if (live !== undefined) row.active = row.active && live;
+    const recorded = getVerdictObjection(row.request_id);
+    if (recorded !== null) row.objection = recorded;
   }
   // The overlay is fixture-tier only: on the live tier the server sends
   // nothing and every owner write is wallet-signed in the browser.

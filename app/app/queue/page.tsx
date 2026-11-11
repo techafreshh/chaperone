@@ -32,6 +32,8 @@ export default async function QueuePage() {
             <th>Request</th>
             <th>Agent</th>
             <th>Purpose</th>
+            <th>Memo</th>
+            <th>Invoice</th>
             <th>Objection</th>
             <th>Decision</th>
           </tr>
@@ -44,6 +46,8 @@ export default async function QueuePage() {
               <td>
                 {String(row.purpose_ref ?? "")} {String(row.vendor ?? "")}
               </td>
+              <td>{String(row.memo ?? "")}</td>
+              <td>{String(row.description ?? "")}</td>
               <td>{String(row.reason ?? row.objection ?? "")}</td>
               <td>
                 {!row.active ? <p>agent frozen</p> : null}
