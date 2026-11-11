@@ -4,11 +4,26 @@ import { formatYoctoToNear, getFleetState } from "../../lib/fleet";
 
 export const dynamic = "force-dynamic";
 
-// Server-rendered fleet page: treasury balance, one card per agent, and
-// plain-HTML add/edit forms, so every probe string is in the first HTML
-// byte stream with zero client JS.
+// Fleet page: treasury balance, one card per agent, wallet-signed
+// freeze/revive plus the fixture-tier add/edit forms. Live tier
+// (`GUARD_CONTRACT_ID` set): the operator signs `set_agent_active`
+// (freeze/revive), `register_agent` and `set_agent_policy` with the owner
+// wallet in the browser; the server sends nothing. Fixture tier: the
+// forms POST to the server fixture routes. Every agent row is visibly
+// labeled `fixture` unless the state came from the chain, and `frozen`
+// renders only when the chain view says `active: false` (or on a
+// fixture-labeled row).
 export default async function FleetPage() {
   const state = await getFleetState();
+  const contractId = (
+    process.env.GUARD_CONTRACT_ID ??
+    process.env.NEAR_CONTRACT_ID ??
+    ""
+  ).trim();
+  const network =
+    (process.env.NEAR_NETWORK ?? "").trim() === "mainnet"
+      ? "mainnet"
+      : "testnet";
   return (
     <main>
       <h1>Fleet</h1>
@@ -30,7 +45,13 @@ export default async function FleetPage() {
                 remaining_today_yocto={agent.remaining_today_yocto}
                 active={agent.active}
               />
-              <KillButton agent_id={agent.agent_id} active={agent.active} />
+              {state.source !== "chain" ? <span>fixture</span> : null}
+              <KillButton
+                agent_id={agent.agent_id}
+                active={agent.active}
+                contractId={contractId}
+                network={network}
+              />
               <form
                 data-testid={`edit-agent-${agent.agent_id}`}
                 method="post"

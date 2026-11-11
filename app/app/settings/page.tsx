@@ -1,12 +1,15 @@
 import { getStatus } from "../../../verifier/src/preflight";
+import VerifierKeyForm from "../../components/VerifierKeyForm";
+import WalletConnect from "../../components/WalletConnect";
 import { getVerifierKey } from "../../lib/settings";
 
 export const dynamic = "force-dynamic";
 
-// Operator settings page (issue #17): NEAR wallet login for the fleet
-// owner, verifier-key rotation with an honest badge preview. Server
-// rendered with zero client JS so every probe string is in the first HTML
-// byte stream. Reads stay public; only rotation writes are owner-gated.
+// Operator settings: wallet connection plus the wallet-signed verifier
+// key rotation form with an honest badge preview. No server sessions;
+// wallet connection state lives in the browser. Reads stay public; live
+// rotation is signed by the owner wallet (`set_verifier`), fixture
+// rotation POSTs to the server overlay.
 export default async function SettingsPage() {
   const verifierKey = await getVerifierKey();
   const status = getStatus();
@@ -16,22 +19,26 @@ export default async function SettingsPage() {
       : status.badge === "unverifiable"
         ? "unverifiable"
         : "deterministic-only";
+  const contractId = (
+    process.env.GUARD_CONTRACT_ID ??
+    process.env.NEAR_CONTRACT_ID ??
+    ""
+  ).trim();
+  const network =
+    (process.env.NEAR_NETWORK ?? "").trim() === "mainnet"
+      ? "mainnet"
+      : "testnet";
   return (
     <main>
       <h1>Settings</h1>
       <section aria-label="Operator">
-        <h2>Operator login</h2>
-        <p>Sign in with your NEAR wallet account to manage the fleet.</p>
-        <form data-testid="login-form" method="post" action="/api/auth/login">
-          <label>
-            Account ID
-            <input name="account_id" placeholder="owner.testnet" />
-          </label>
-          <button type="submit">Log in</button>
-        </form>
-        <form data-testid="logout-form" method="post" action="/api/auth/logout">
-          <button type="submit">Log out</button>
-        </form>
+        <h2>Operator wallet</h2>
+        <p>
+          Connect with your NEAR wallet to sign owner actions. The contract
+          owner check is the only authorization; the app server holds no
+          owner key.
+        </p>
+        <WalletConnect />
       </section>
       <section aria-label="Verifier">
         <h2>Purpose verifier key</h2>
@@ -39,18 +46,11 @@ export default async function SettingsPage() {
           The Ed25519 verifier public key the guard checks verdict signatures
           against. Rotating the verifier key takes effect for new verdicts.
         </p>
-        <p>Current verifier key: {verifierKey ?? "not set"}</p>
-        <form
-          data-testid="verifier-key-form"
-          method="post"
-          action="/api/settings/verifier-key"
-        >
-          <label>
-            Verifier key
-            <input name="verifier_key" placeholder="base58 ed25519 public key" />
-          </label>
-          <button type="submit">Rotate verifier key</button>
-        </form>
+        <VerifierKeyForm
+          contractId={contractId}
+          network={network}
+          currentKey={verifierKey}
+        />
         <div data-testid="badge-preview">{previewLabel}</div>
       </section>
     </main>

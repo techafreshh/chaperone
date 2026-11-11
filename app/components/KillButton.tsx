@@ -1,34 +1,36 @@
 "use client";
 
-// Owner-gated one-click kill/revive (issue #17): confirm-then-`fetch` over
-// the session-cookie kill/revive routes, no wallet deps (server-only
-// `near-api-js` stays out of this client component). Unauthenticated clicks
-// fail closed at the route with 401; on 200 the page reloads so `GET
-// /fleet` shows the flipped state.
+import OwnerWriteButton from "./OwnerWriteButton";
+
+// Wallet-signed kill switch (issue #62): the UI freeze is the on-chain
+// `set_agent_active` freeze signed by the owner's wallet. Agent key
+// revocation stays an operator CLI (`scripts/revoke-key.sh`). Fixture
+// tier (no contract id) POSTs to the server fixture routes.
 export default function KillButton({
   agent_id,
   active,
+  contractId = "",
+  network = "testnet",
 }: {
   agent_id: string;
   active: boolean;
+  contractId?: string;
+  network?: string;
 }) {
   const action = active ? "kill" : "revive";
-  const label = active ? `Freeze ${agent_id}?` : `Revive ${agent_id}?`;
-  const text = active ? "Freeze" : "Revive";
-  async function onClick() {
-    if (!window.confirm(label)) return;
-    const res = await fetch(`/api/agents/${agent_id}/${action}`, {
-      method: "POST",
-    });
-    if (res.ok) window.location.reload();
-  }
+  const label = active ? "Freeze" : "Revive";
+  const confirmMessage = active ? `Freeze ${agent_id}?` : `Revive ${agent_id}?`;
   return (
-    <button
-      type="button"
-      data-testid={`${action}-${agent_id}`}
-      onClick={onClick}
-    >
-      {text}
-    </button>
+    <OwnerWriteButton
+      contractId={contractId}
+      network={network}
+      methodName="set_agent_active"
+      args={{ agent_id, active: !active }}
+      label={label}
+      testId={`${action}-${agent_id}`}
+      confirmMessage={confirmMessage}
+      fallbackUrl={`/api/agents/${agent_id}/${action}`}
+      fallbackMethod="POST"
+    />
   );
 }
