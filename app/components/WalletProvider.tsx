@@ -48,6 +48,12 @@ export function explorerTxUrl(hash: string, network: string): string {
   return `${host}/txns/${hash}`;
 }
 
+export function explorerAddressUrl(address: string, network: string): string {
+  const host =
+    network === "mainnet" ? "https://nearblocks.io" : "https://testnet.nearblocks.io";
+  return `${host}/address/${address}`;
+}
+
 // Build the `FunctionCall` action for an owner write. Uses the v10
 // `actionCreators.functionCall` NAJ action when available, with the
 // internal `{ type: "FunctionCall", params }` shape attached as compat

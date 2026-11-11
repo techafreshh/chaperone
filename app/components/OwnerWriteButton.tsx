@@ -34,6 +34,7 @@ export default function OwnerWriteButton({
   fallbackUrl,
   fallbackMethod = "POST",
   signer,
+  className,
 }: {
   contractId: string;
   network?: string;
@@ -45,6 +46,7 @@ export default function OwnerWriteButton({
   fallbackUrl?: string;
   fallbackMethod?: string;
   signer?: OwnerSigner | null;
+  className?: string;
 }) {
   const refresh = useSafeRefresh();
   const wallet = useWallet();
@@ -119,7 +121,16 @@ export default function OwnerWriteButton({
 
   return (
     <span>
-      <button type="button" data-testid={testId} onClick={onClick} disabled={pending}>
+      <button
+        type="button"
+        data-testid={testId}
+        onClick={onClick}
+        disabled={pending}
+        className={
+          className ??
+          "rounded bg-sky-700 px-3 py-1 text-sm font-semibold text-white hover:bg-sky-600 disabled:opacity-50"
+        }
+      >
         {label}
       </button>
       {txHash !== null && txHash !== "" ? (
