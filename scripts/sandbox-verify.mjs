@@ -11,6 +11,7 @@
 // the sandbox when it can) fails closed on assertion mismatches.
 // Usage: node scripts/sandbox-verify.mjs [--wasm <path>]
 import { existsSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -20,7 +21,7 @@ import {
   FC_METHOD_NAMES,
 } from "./lib/agent-keys.mjs";
 import { DEFAULT_WASM_PATH } from "./lib/deploy-plan.mjs";
-import { buildVerdictPayload, waitForRequestStatus } from "./lib/attack-gates.mjs";
+import { buildVerdictPayload, canonicalEvidence, waitForRequestStatus } from "./lib/attack-gates.mjs";
 
 // Rejection reasons asserted per gate, mirroring
 // `REASON_*` in `contract/src/request.rs`. The mapping (not the strings)
@@ -223,6 +224,7 @@ async function main() {
     await root.call(contract, "register_purpose_ref", {
       ref_id: PURPOSE_REF,
       vendor: "CoreWeave",
+      description: "Sandbox fixture invoice",
       payee: GOOD_PAYEE,
       max_amount_yocto: "30000000000000000000000000",
     });
@@ -236,6 +238,7 @@ async function main() {
         amount_yocto: "20000000000000000000000000",
         purpose_ref: PURPOSE_REF,
         vendor: "CoreWeave",
+        memo: "Sandbox round-trip payment",
       }),
       { status: "rejected", reason: expectedRejectReason("overAllowance") },
       "over-allowance",
@@ -248,6 +251,7 @@ async function main() {
         amount_yocto: "1000000000000000000000000",
         purpose_ref: PURPOSE_REF,
         vendor: "CoreWeave",
+        memo: "Sandbox round-trip payment",
       }),
       { status: "rejected", reason: expectedRejectReason("allowlist") },
       "allowlist",
@@ -260,6 +264,7 @@ async function main() {
         amount_yocto: "1000000000000000000000000",
         purpose_ref: "invoice-999",
         vendor: "CoreWeave",
+        memo: "Sandbox round-trip payment",
       }),
       { status: "rejected", reason: expectedRejectReason("purposeRef") },
       "unknown-purpose-ref",
@@ -271,6 +276,7 @@ async function main() {
       amount_yocto: "5000000000000000000000000",
       purpose_ref: PURPOSE_REF,
       vendor: "CoreWeave",
+      memo: "Sandbox round-trip payment",
     });
     assertOutcome(staged, { status: "staged", reason: null }, "clean-transit");
     const stored = await contract.view("get_request", { request_id: staged.request_id });
@@ -313,6 +319,7 @@ async function main() {
     await root.call(contract, "register_purpose_ref", {
       ref_id: PAYOUT_REF,
       vendor: "CoreWeave",
+      description: "Sandbox fixture invoice",
       payee: payee.accountId,
       max_amount_yocto: "30000000000000000000000000",
     });
@@ -324,13 +331,36 @@ async function main() {
           `Sandbox payout setup failed: request ${requestId} is ${record?.status}, expected staged.`,
         );
       }
+      // Fixture evidence bundle (issue #64): the same canonical shape
+      // the verifier binds, with `"fixture": true`.
+      const evidenceSha256 = createHash("sha256")
+        .update(
+          canonicalEvidence({
+            chat_id: "",
+            filtered: false,
+            fixture: true,
+            model: "fixture-model",
+            preflight_nonce: "",
+            request_sha256: "",
+            response_sha256: "",
+            signature: "",
+            signing_address: "",
+          }),
+          "utf8",
+        )
+        .digest("hex");
       const signatureBase58 = signWithSuiteKey(
-        buildVerdictPayload(record, consistent),
+        buildVerdictPayload(record, consistent, {
+          contractId,
+          evidenceSha256,
+          memoSha256: createHash("sha256").update(record.memo ?? "", "utf8").digest("hex"),
+        }),
         suiteKey,
       );
       await root.call(contract, "submit_verdict", {
         request_id: requestId,
         consistent,
+        evidence_sha256: evidenceSha256,
         signature_base58: signatureBase58,
       });
     }
@@ -367,6 +397,7 @@ async function main() {
         amount_yocto: nearToYocto(2),
         purpose_ref: PAYOUT_REF,
         vendor: "CoreWeave",
+        memo: "Sandbox round-trip payment",
       });
       assertOutcome(outcome, { status: "staged", reason: null }, "payout-request");
       await submitPayoutVerdict(outcome.request_id, true);
@@ -405,6 +436,7 @@ async function main() {
         amount_yocto: nearToYocto(2),
         purpose_ref: PAYOUT_REF,
         vendor: "CoreWeave",
+        memo: "Sandbox round-trip payment",
       });
       assertOutcome(outcome, { status: "staged", reason: null }, "underfunded-request");
       await submitPayoutVerdict(outcome.request_id, true);
@@ -460,6 +492,7 @@ async function main() {
       await root.call(contract, "register_purpose_ref", {
         ref_id: GHOST_REF,
         vendor: "CoreWeave",
+        description: "Sandbox fixture invoice",
         payee: ghostPayee,
         max_amount_yocto: "30000000000000000000000000",
       });
@@ -470,6 +503,7 @@ async function main() {
         amount_yocto: nearToYocto(1),
         purpose_ref: GHOST_REF,
         vendor: "CoreWeave",
+        memo: "Sandbox round-trip payment",
       });
       assertOutcome(outcome, { status: "staged", reason: null }, "ghost-request");
       await submitPayoutVerdict(outcome.request_id, true);
@@ -500,6 +534,7 @@ async function main() {
         amount_yocto: nearToYocto(1),
         purpose_ref: PAYOUT_REF,
         vendor: "CoreWeave",
+        memo: "Sandbox round-trip payment",
       });
       assertOutcome(outcome, { status: "staged", reason: null }, "reject-request");
       await submitPayoutVerdict(outcome.request_id, false);
@@ -540,6 +575,7 @@ async function main() {
         amount_yocto: "1000000000000000000000000",
         purpose_ref: PURPOSE_REF,
         vendor: "CoreWeave",
+        memo: "Sandbox round-trip payment",
       }),
       { status: "rejected", reason: expectedRejectReason("inactive") },
       "kill-switch",

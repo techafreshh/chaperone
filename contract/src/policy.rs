@@ -125,6 +125,7 @@ mod tests {
             "Vendor".to_string(),
             "payee.near".parse().unwrap(),
             U128::from(10u128),
+            "Test invoice description".to_string(),
         );
 
         // Spend 5 on day 0.
@@ -137,6 +138,7 @@ mod tests {
             U128::from(5u128),
             "ref-1".to_string(),
             "Vendor".to_string(),
+            "Test payment memo".to_string(),
         );
         assert_eq!(outcome.status, "staged");
 

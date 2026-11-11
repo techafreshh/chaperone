@@ -10,8 +10,13 @@ import bs58 from "bs58";
 import { Wallet } from "ethers";
 import {
   buildJudgePrompt,
+  canonicalEvidence,
   CLOUD_BASE_URL_DEFAULT,
+  containsJudgeInstructions,
+  fixtureJudgeWordOverlap,
   judgeModel,
+  MEMO_FILTER_OBJECTION,
+  type EvidenceBundle,
 } from "./judge.js";
 import {
   compareHashes,
@@ -19,7 +24,11 @@ import {
   sha256HexText,
   verifyBinding,
 } from "./bind.js";
-import { getLastVerified, recordJudgeOutcome } from "./preflight.js";
+import {
+  getLastVerified,
+  recordJudgeOutcome,
+  runPreflight,
+} from "./preflight.js";
 
 // Verifier judge-bind-sign-submit pipeline as a framework-agnostic
 // factory. `POST /verify` in the Next service is a thin route over
@@ -37,15 +46,28 @@ export interface PaymentRequestShape {
   amount_yocto: string;
   purpose_ref: string;
   vendor: string;
+  memo: string;
   status: string;
   reason?: string | null;
 }
 
+export interface PurposeRefShape {
+  ref_id: string;
+  vendor: string;
+  payee: string;
+  description: string;
+  remaining_yocto: string;
+  open: boolean;
+}
+
 export interface ChainAdapter {
+  readonly contractId: string;
   getRequest(requestId: number): Promise<PaymentRequestShape | null>;
+  getPurposeRef(refId: string): Promise<PurposeRefShape | null>;
   submitVerdict(
     requestId: number,
     consistent: boolean,
+    evidenceSha256: string,
     signatureBase58: string,
   ): Promise<{ status: string }>;
 }
@@ -57,6 +79,16 @@ export interface SeedRequest {
   amount_yocto?: string;
   purpose_ref?: string;
   vendor?: string;
+  memo?: string;
+}
+
+export interface SeedPurposeRef {
+  ref_id: string;
+  vendor?: string;
+  payee?: string;
+  description?: string;
+  remaining_yocto?: string;
+  open?: boolean;
 }
 
 const FIVE_NEAR_YOCTO = `5${"0".repeat(24)}`;
@@ -67,13 +99,18 @@ const FIVE_NEAR_YOCTO = `5${"0".repeat(24)}`;
 // verifier key (mirrors `submit_verdict`: "Request not found",
 // "Request is not staged", "Invalid verdict signature").
 export class InMemoryChain implements ChainAdapter {
+  readonly contractId: string;
   private readonly requests = new Map<number, PaymentRequestShape>();
+  private readonly refs = new Map<string, PurposeRefShape>();
   private readonly verifierPublicKey: Buffer;
 
   constructor(opts?: {
     seeds?: SeedRequest[];
+    refs?: SeedPurposeRef[];
     verifierPublicKey?: Uint8Array;
+    contractId?: string;
   }) {
+    this.contractId = opts?.contractId ?? "guard.testnet";
     const seeds: SeedRequest[] = opts?.seeds ??
       [1, 2, 3, 4, 5, 6].map((id) => ({ request_id: id }));
     for (const seed of seeds) {
@@ -84,8 +121,29 @@ export class InMemoryChain implements ChainAdapter {
         amount_yocto: seed.amount_yocto ?? FIVE_NEAR_YOCTO,
         purpose_ref: seed.purpose_ref ?? "invoice-114",
         vendor: seed.vendor ?? "CoreWeave",
+        memo: seed.memo ?? "GPU hours, October 2026",
         status: "staged",
         reason: null,
+      });
+    }
+    const refSeeds: SeedPurposeRef[] = opts?.refs ?? [
+      {
+        ref_id: "invoice-114",
+        vendor: "CoreWeave",
+        payee: "payee.near",
+        description: "GPU hours, October 2026",
+        remaining_yocto: `2${"0".repeat(25)}`,
+        open: true,
+      },
+    ];
+    for (const ref of refSeeds) {
+      this.refs.set(ref.ref_id, {
+        ref_id: ref.ref_id,
+        vendor: ref.vendor ?? "CoreWeave",
+        payee: ref.payee ?? "payee.near",
+        description: ref.description ?? "",
+        remaining_yocto: ref.remaining_yocto ?? "0",
+        open: ref.open ?? true,
       });
     }
     this.verifierPublicKey = Buffer.from(
@@ -103,14 +161,22 @@ export class InMemoryChain implements ChainAdapter {
     return record === undefined ? null : { ...record };
   }
 
+  async getPurposeRef(refId: string): Promise<PurposeRefShape | null> {
+    const ref = this.refs.get(refId);
+    return ref === undefined ? null : { ...ref };
+  }
+
   async submitVerdict(
     requestId: number,
     consistent: boolean,
+    evidenceSha256: string,
     signatureBase58: string,
   ): Promise<{ status: string }> {
     const record = this.requests.get(requestId);
     if (record === undefined) throw new Error("Request not found");
     if (record.status !== "staged") throw new Error("Request is not staged");
+    if (!/^[0-9a-fA-F]{64}$/.test(evidenceSha256))
+      throw new Error("Invalid evidence sha256");
     let signature: Buffer;
     try {
       signature = Buffer.from(bs58.decode(signatureBase58));
@@ -118,7 +184,10 @@ export class InMemoryChain implements ChainAdapter {
       throw new Error("Invalid verdict signature");
     }
     if (signature.length !== 64) throw new Error("Invalid verdict signature");
-    const payload = buildVerdictPayload(record, consistent);
+    const payload = buildVerdictPayload(record, consistent, {
+      contractId: this.contractId,
+      evidenceSha256,
+    });
     const publicKey = createPublicKey({
       key: spkiDer(this.verifierPublicKey),
       format: "der",
@@ -134,23 +203,44 @@ export class InMemoryChain implements ChainAdapter {
 
 // Canonical verdict payload, byte-identical to PRD §10.1 and the
 // dependency `canonical_verdict_payload` (`contract/src/verifier.rs`):
-// `domain || le_u64(id) || agent || payee || le_u128(amount) || ref ||
+// `domain || le_u32(len(contract)) || contract || le_u64(id) ||
+// le_u32(len(agent)) || agent || le_u32(len(payee)) || payee ||
+// le_u128(amount) || le_u32(len(ref)) || ref || sha256(memo) || evidence ||
 // byte` with verdict byte 1 for consistent, 0 for inconsistent.
 export function buildVerdictPayload(
   request: PaymentRequestShape,
   consistent: boolean,
+  opts: { contractId: string; evidenceSha256: string },
 ): Buffer {
-  const domain = Buffer.from("chaperone-verdict-v1", "utf8");
+  if (typeof opts.contractId !== "string" || opts.contractId === "")
+    throw new Error("buildVerdictPayload needs a contractId");
+  if (!/^[0-9a-fA-F]{64}$/.test(opts.evidenceSha256))
+    throw new Error("buildVerdictPayload needs evidenceSha256 as 64 hex chars");
+  const domain = Buffer.from("chaperone-verdict-v2", "utf8");
+  const contractId = Buffer.from(opts.contractId, "utf8");
+  const agent = Buffer.from(request.agent_id, "utf8");
+  const payee = Buffer.from(request.payee, "utf8");
+  const ref = Buffer.from(request.purpose_ref, "utf8");
   const id = Buffer.alloc(8);
   id.writeBigUInt64LE(BigInt(request.request_id));
   const amount = toLe128(request.amount_yocto);
+  const memoHash = sha256HexText(request.memo ?? "");
+  const evidence = Buffer.from(opts.evidenceSha256, "hex");
+  const prefix = (bytes: Buffer): Buffer => {
+    const len = Buffer.alloc(4);
+    len.writeUInt32LE(bytes.length);
+    return Buffer.concat([len, bytes]);
+  };
   return Buffer.concat([
     domain,
+    prefix(contractId),
     id,
-    Buffer.from(request.agent_id, "utf8"),
-    Buffer.from(request.payee, "utf8"),
+    prefix(agent),
+    prefix(payee),
     amount,
-    Buffer.from(request.purpose_ref, "utf8"),
+    prefix(ref),
+    Buffer.from(memoHash, "hex"),
+    evidence,
     Buffer.from([consistent ? 1 : 0]),
   ]);
 }
@@ -313,6 +403,215 @@ export interface VerifyStack {
   model: string;
 }
 
+// Judge-side objection memory: the contract stores no objection on held
+// rows, so the verifier keeps the latest objection per request for the
+// queue display (same pattern as the MCP `objections` fixture store).
+const verdictObjections = new Map<number, string>();
+
+export function getVerdictObjection(requestId: number): string | null {
+  return verdictObjections.get(requestId) ?? null;
+}
+
+function recordVerdictObjection(
+  requestId: number,
+  objection: string | undefined,
+): void {
+  if (objection === undefined || objection === "") {
+    verdictObjections.delete(requestId);
+  } else {
+    verdictObjections.set(requestId, objection);
+  }
+}
+
+// Test seam: drop the module-level objection memory.
+export function __resetVerdictObjectionsForTests(): void {
+  verdictObjections.clear();
+}
+
+export interface JudgeAndBindOptions {
+  judgeInput: {
+    request_id: number;
+    agent_id: string;
+    payee: string;
+    amount_yocto: string;
+    purpose_ref: string;
+    vendor: string;
+    memo: string;
+    description: string;
+    remaining_yocto: string;
+  };
+  apiKey: string;
+  cloudBaseUrl: string;
+  httpJudge: boolean;
+  model: string;
+  judgeModelId: string;
+  fetchImpl?: typeof fetch;
+  tamper: VerifyTamper | undefined;
+  expectedAddresses?: string[];
+  storedAddress?: string;
+  fixtureWalletAddress: string;
+  fixtureSign: (message: string) => Promise<string>;
+}
+
+export type JudgeAndBindResult =
+  | {
+    ok: true;
+    consistent: boolean;
+    objection?: string;
+    chatId: string;
+    requestHash: string;
+    responseHash: string;
+    signature: string;
+    signingAddress: string;
+  }
+  | { ok: false; reason: string; recordReason: string; transportError?: boolean };
+
+// Judge (model call or fixture overlap rule) plus bind (hash comparison
+// and signer recovery for the HTTP path; fixture-issued signature for
+// the local path). Refusals carry the failed check in `recordReason` for
+// the badge store and the wire message in `reason`.
+async function judgeAndBind(opts: JudgeAndBindOptions): Promise<JudgeAndBindResult> {
+  if (opts.httpJudge) {
+    const judged = await judgeModel({
+      baseUrl: opts.cloudBaseUrl,
+      model: opts.model,
+      apiKey: opts.apiKey,
+      request: opts.judgeInput,
+      fetchImpl: opts.fetchImpl,
+    });
+    if (!judged.ok) {
+      // Transport failures leave badge state untouched (mirror the
+      // preflight `transportError` mapping); only evidence that exists
+      // but refuses to parse is recorded.
+      if (judged.transportError === true) {
+        return { ok: false, reason: judged.reason, recordReason: judged.reason, transportError: true };
+      }
+      return { ok: false, reason: judged.reason, recordReason: `judge: ${judged.reason}` };
+    }
+    // Fetch the completion signature, then bind: hash comparison plus
+    // signer recovery vs the stored attestation address.
+    let text: string;
+    let signature: string;
+    try {
+      const fetched = await fetchCompletionSignature({
+        baseUrl: opts.cloudBaseUrl,
+        chatId: judged.chatId,
+        model: opts.model,
+        apiKey: opts.apiKey,
+        fetchImpl: opts.fetchImpl,
+      });
+      text = fetched.text;
+      signature = fetched.signature;
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      return { ok: false, reason, recordReason: `bind: ${reason}` };
+    }
+    const effectiveResponseHash = opts.tamper === "bad-signature"
+      ? flipFirstHex(judged.responseHash)
+      : judged.responseHash;
+    const compared = compareHashes(
+      text,
+      judged.requestHash,
+      effectiveResponseHash,
+      opts.judgeModelId,
+    );
+    if (!compared.valid) {
+      const reason = compared.reason ?? "hash mismatch";
+      return { ok: false, reason, recordReason: `bind: ${reason}` };
+    }
+    const expectedAddresses = opts.tamper === "wrong-signer"
+      ? ["0x0000000000000000000000000000000000000001"]
+      : (opts.expectedAddresses ??
+        (opts.storedAddress !== undefined ? [opts.storedAddress] : []));
+    const binding = await verifyBinding({ text, signature, expectedAddresses });
+    if (!binding.verified) {
+      const reason = binding.reason ?? "signer mismatch";
+      return { ok: false, reason, recordReason: `bind: ${reason}` };
+    }
+    return {
+      ok: true,
+      consistent: judged.consistent,
+      ...(judged.objection !== undefined ? { objection: judged.objection } : {}),
+      chatId: judged.chatId,
+      requestHash: judged.requestHash,
+      responseHash: judged.responseHash,
+      signature,
+      signingAddress: binding.recoveredAddress ?? "",
+    };
+  }
+  // No-key local fixture judgment: the deterministic word-overlap rule
+  // with exact-bytes hashing identical to the HTTP path, "issued" by
+  // the fixture wallet so binding targets it.
+  const overlap = fixtureJudgeWordOverlap(opts.judgeInput.memo, opts.judgeInput.description);
+  const requestText = JSON.stringify({
+    model: opts.judgeModelId,
+    messages: buildJudgePrompt(opts.judgeInput),
+  });
+  const chatId = `chatcmpl-local-${randomBytes(8).toString("hex")}`;
+  const responseText = JSON.stringify({
+    id: chatId,
+    object: "chat.completion",
+    created: Math.floor(Date.now() / 1000),
+    model: opts.judgeModelId,
+    choices: [
+      {
+        index: 0,
+        message: {
+          role: "assistant",
+          content: JSON.stringify(
+            overlap.consistent
+              ? { consistent: true }
+              : { consistent: false, objection: overlap.objection },
+          ),
+        },
+        finish_reason: "stop",
+      },
+    ],
+  });
+  const requestHash = sha256HexText(requestText);
+  const responseHash = sha256HexText(responseText);
+  const signedText = `${opts.judgeModelId}:${requestHash}:${responseHash}`;
+  const signature = await opts.fixtureSign(signedText);
+  // Bind the fixture issuance exactly like the HTTP path (hash
+  // comparison plus signer recovery), so the tamper vectors refuse on
+  // the local path too.
+  const effectiveResponseHash = opts.tamper === "bad-signature"
+    ? flipFirstHex(responseHash)
+    : responseHash;
+  const compared = compareHashes(
+    signedText,
+    requestHash,
+    effectiveResponseHash,
+    opts.judgeModelId,
+  );
+  if (!compared.valid) {
+    const reason = compared.reason ?? "hash mismatch";
+    return { ok: false, reason, recordReason: `bind: ${reason}` };
+  }
+  const expectedAddresses = opts.tamper === "wrong-signer"
+    ? ["0x0000000000000000000000000000000000000001"]
+    : (opts.expectedAddresses ?? [opts.fixtureWalletAddress]);
+  const binding = await verifyBinding({
+    text: signedText,
+    signature,
+    expectedAddresses,
+  });
+  if (!binding.verified) {
+    const reason = binding.reason ?? "signer mismatch";
+    return { ok: false, reason, recordReason: `bind: ${reason}` };
+  }
+  return {
+    ok: true,
+    consistent: overlap.consistent,
+    ...(overlap.objection !== undefined ? { objection: overlap.objection } : {}),
+    chatId,
+    requestHash,
+    responseHash,
+    signature,
+    signingAddress: opts.fixtureWalletAddress,
+  };
+}
+
 // Build a matched handler + chain pair: the chain's registered verifier key
 // is derived from the same signing key the handler signs with. An explicit
 // `chain` (in-memory fixture or live `near-api-js` adapter) is used as-is;
@@ -407,169 +706,150 @@ export function createVerifyHandler(
     const judgeFixture = apiKey === "";
     const judgeModelId = httpJudge ? model : (model !== "" ? model : "fixture-model");
 
-    // 1. Judge request vs reason.
-    let consistent: boolean;
-    let chatId: string;
-    let requestHash: string;
-    let responseHash: string;
-    if (httpJudge) {
-      const judged = await judgeModel({
-        baseUrl: cloudBaseUrl,
-        model,
-        apiKey,
-        request: {
-          request_id: record.request_id,
-          agent_id: record.agent_id,
-          payee: record.payee,
-          amount_yocto: record.amount_yocto,
-          purpose_ref: record.purpose_ref,
-          vendor: record.vendor,
-          reason: record.reason,
+    // Load the cited purpose ref: the judge receives its description,
+    // vendor and remaining amount alongside the memo.
+    let ref: PurposeRefShape | null;
+    try {
+      ref = await chain.getPurposeRef(record.purpose_ref);
+    } catch (error) {
+      return {
+        status: 502,
+        body: {
+          error: `chain lookup failed: ${error instanceof Error ? error.message : String(error)}`,
+          request_id: requestId,
         },
+      };
+    }
+    if (ref === null) {
+      return {
+        status: 502,
+        body: { error: "purpose ref not found", request_id: requestId },
+      };
+    }
+    const memo = typeof record.memo === "string" ? record.memo : "";
+    const judgeInput = {
+      request_id: record.request_id,
+      agent_id: record.agent_id,
+      payee: record.payee,
+      amount_yocto: record.amount_yocto,
+      purpose_ref: record.purpose_ref,
+      vendor: record.vendor,
+      memo,
+      description: ref.description,
+      remaining_yocto: ref.remaining_yocto,
+    };
+
+    // 0. Deterministic memo filter, before any fetch: an
+    // instruction-shaped memo never reaches the model, so a filtered
+    // memo records zero model calls.
+    let consistent: boolean;
+    let objection: string | undefined;
+    let filtered = false;
+    let chatId = "";
+    let requestHash = "";
+    let responseHash = "";
+    let signature = "";
+    let signingAddress = "";
+    let preflightNonce = "";
+    if (containsJudgeInstructions(memo)) {
+      consistent = false;
+      objection = MEMO_FILTER_OBJECTION;
+      filtered = true;
+    } else {
+      const preflight = await runPreflight({
+        model: model !== "" ? model : undefined,
+        apiKey: opts.apiKey ?? process.env.NEAR_AI_API_KEY ?? undefined,
         fetchImpl: opts.fetchImpl,
       });
+      if (preflight.transportError === true) {
+        return {
+          status: 502,
+          body: { error: preflight.reason ?? "attestation fetch failed", request_id: requestId },
+        };
+      }
+      preflightNonce = preflight.request_nonce;
+      const judged = await judgeAndBind({
+        judgeInput,
+        apiKey,
+        cloudBaseUrl,
+        httpJudge,
+        model,
+        judgeModelId,
+        fetchImpl: opts.fetchImpl,
+        tamper,
+        expectedAddresses: opts.expectedAddresses,
+        storedAddress: getLastVerified()?.signingAddress,
+        fixtureWalletAddress: fixtureWallet.address,
+        fixtureSign: (message: string) => fixtureWallet.signMessage(message),
+      });
       if (!judged.ok) {
-        // Transport failures leave badge state untouched (mirror the
-        // preflight `transportError` mapping); only evidence that exists
-        // but refuses to parse is recorded.
         if (judged.transportError === true) {
           return {
             status: 502,
             body: { error: judged.reason, request_id: requestId },
           };
         }
-        recordJudgeOutcome({
-          verified: false,
-          reason: `judge: ${judged.reason}`,
-          model: judgeModelId,
-          fixture: true,
-        });
-        return {
-          status: 502,
-          body: { error: judged.reason, request_id: requestId },
-        };
-      }
-      consistent = judged.consistent;
-      chatId = judged.chatId;
-      requestHash = judged.requestHash;
-      responseHash = judged.responseHash;
-    } else {
-      // No-key local fixture judgment: deterministic consistent verdict
-      // with exact-bytes hashing identical to the HTTP path.
-      const requestText = JSON.stringify({
-        model: judgeModelId,
-        messages: buildJudgePrompt({
-          request_id: record.request_id,
-          agent_id: record.agent_id,
-          payee: record.payee,
-          amount_yocto: record.amount_yocto,
-          purpose_ref: record.purpose_ref,
-          vendor: record.vendor,
-          reason: record.reason,
-        }),
-      });
-      chatId = `chatcmpl-local-${randomBytes(8).toString("hex")}`;
-      const responseText = JSON.stringify({
-        id: chatId,
-        object: "chat.completion",
-        created: Math.floor(Date.now() / 1000),
-        model: judgeModelId,
-        choices: [
-          {
-            index: 0,
-            message: { role: "assistant", content: JSON.stringify({ consistent: true }) },
-            finish_reason: "stop",
-          },
-        ],
-      });
-      requestHash = sha256HexText(requestText);
-      responseHash = sha256HexText(responseText);
-      consistent = true;
-    }
-
-    // 2. Fetch the completion signature (HTTP) or issue the fixture one.
-    let text: string;
-    let signature: string;
-    try {
-      if (httpJudge) {
-        const fetched = await fetchCompletionSignature({
-          baseUrl: cloudBaseUrl,
-          chatId,
-          model,
-          apiKey,
-          fetchImpl: opts.fetchImpl,
-        });
-        text = fetched.text;
-        signature = fetched.signature;
+        // Failing closed: an unparseable model verdict (re-asked up to
+        // 5 times inside `judgeModel`) holds the payment instead of
+        // leaving it staged. Bind failures stay 502 with no submission.
+        if (judged.recordReason.startsWith("judge:")) {
+          consistent = false;
+          objection = judged.reason;
+          filtered = false;
+          chatId = "";
+          requestHash = "";
+          responseHash = "";
+          signature = "";
+          signingAddress = "";
+        } else {
+          recordJudgeOutcome({
+            verified: false,
+            reason: judged.recordReason,
+            model: judgeModelId,
+            fixture: true,
+          });
+          return {
+            status: 502,
+            body: { error: judged.reason, request_id: requestId },
+          };
+        }
       } else {
-        const signedText = `${judgeModelId}:${requestHash}:${responseHash}`;
-        text = signedText;
-        signature = await fixtureWallet.signMessage(signedText);
+        consistent = judged.consistent;
+        objection = judged.objection;
+        chatId = judged.chatId;
+        requestHash = judged.requestHash;
+        responseHash = judged.responseHash;
+        signature = judged.signature;
+        signingAddress = judged.signingAddress;
       }
-    } catch (error) {
-      return {
-        status: 502,
-        body: {
-          error: error instanceof Error ? error.message : String(error),
-          request_id: requestId,
-        },
-      };
     }
 
-    // 3. Bind: hash comparison, then signer recovery vs stored address.
-    const effectiveResponseHash = tamper === "bad-signature"
-      ? flipFirstHex(responseHash)
-      : responseHash;
-    const compared = compareHashes(
-      text,
-      requestHash,
-      effectiveResponseHash,
-      judgeModelId,
-    );
-    if (!compared.valid) {
-      recordJudgeOutcome({
-        verified: false,
-        reason: `bind: ${compared.reason ?? "hash mismatch"}`,
-        model: judgeModelId,
-        fixture: true,
-      });
-      return {
-        status: 502,
-        body: {
-          error: compared.reason ?? "hash mismatch",
-          request_id: requestId,
-        },
-      };
-    }
-    const stored = getLastVerified()?.signingAddress;
-    const expectedAddresses = tamper === "wrong-signer"
-      ? ["0x0000000000000000000000000000000000000001"]
-      : (opts.expectedAddresses ??
-        (httpJudge ? (stored !== undefined ? [stored] : []) : [fixtureWallet.address]));
-    const binding = await verifyBinding({
-      text,
+    // Evidence bundle (canonical JSON, sorted keys, no whitespace): the
+    // sha256 of these exact bytes binds the verdict payload. Fixture
+    // runs build the same shape with `"fixture": true`.
+    const evidenceBundle: EvidenceBundle = {
+      chat_id: chatId,
+      filtered,
+      fixture: judgeFixture,
+      model: judgeModelId,
+      preflight_nonce: preflightNonce,
+      request_sha256: requestHash,
+      response_sha256: responseHash,
       signature,
-      expectedAddresses,
-    });
-    if (!binding.verified) {
-      recordJudgeOutcome({
-        verified: false,
-        reason: `bind: ${binding.reason ?? "signer mismatch"}`,
-        model: judgeModelId,
-        fixture: true,
-      });
-      return {
-        status: 502,
-        body: { error: binding.reason ?? "signer mismatch", request_id: requestId },
-      };
-    }
+      signing_address: signingAddress,
+    };
+    const evidenceSha256 = sha256HexText(canonicalEvidence(evidenceBundle));
+    recordVerdictObjection(requestId, objection);
 
-    // 4. Sign the canonical payload and submit on-chain.
+    // Sign the v2 canonical payload and submit on-chain.
     if (keys === null) keys = resolveVerifierKeys(opts.signingKey);
-    const payload = buildVerdictPayload(record, consistent);
+    const payload = buildVerdictPayload(record, consistent, {
+      contractId: chain.contractId,
+      evidenceSha256,
+    });
     const signatureBase58 = signVerdictPayload(payload, keys);
     try {
-      await chain.submitVerdict(requestId, consistent, signatureBase58);
+      await chain.submitVerdict(requestId, consistent, evidenceSha256, signatureBase58);
     } catch (error) {
       recordJudgeOutcome({
         verified: false,
@@ -590,7 +870,8 @@ export function createVerifyHandler(
     // (honesty rule); only a live judgment under the real key verifies.
     // The fixture note keeps a non-empty details string on the badge
     // regardless of probe ordering (success-then-status still shows why
-    // the verdict is not TEE-verified).
+    // the verdict is not TEE-verified). A live memo-filter verdict is
+    // likewise unverifiable: it carries no TEE evidence at all.
     const fixture = judgeFixture || keys.testKey;
     recordJudgeOutcome({
       verified: true,
@@ -598,14 +879,18 @@ export function createVerifyHandler(
       fixture,
       ...(fixture
         ? { reason: "fixture judgment is not TEE-verified" }
-        : {}),
-      signingAddress: binding.recoveredAddress,
+        : filtered && objection !== undefined
+          ? { reason: objection }
+          : {}),
+      ...(signingAddress !== "" ? { signingAddress } : {}),
     });
     return {
       status: 200,
       body: {
         consistent,
+        ...(objection !== undefined ? { objection } : {}),
         signature: signatureBase58,
+        evidence_sha256: evidenceSha256,
         request_id: requestId,
       },
     };
@@ -694,8 +979,27 @@ function normalizeViewRequest(value: unknown): PaymentRequestShape | null {
       ? record.purpose_ref
       : "",
     vendor: typeof record.vendor === "string" ? record.vendor : "",
+    memo: typeof record.memo === "string" ? record.memo : "",
     status: record.status,
     reason: typeof record.reason === "string" ? record.reason : null,
+  };
+}
+
+function normalizePurposeRefView(value: unknown): PurposeRefShape | null {
+  if (typeof value !== "object" || value === null) return null;
+  const record = value as Record<string, unknown>;
+  if (typeof record.ref_id !== "string" || record.ref_id === "") return null;
+  const remainingRaw = record.remaining_yocto;
+  const remaining = typeof remainingRaw === "string" && /^\d+$/.test(remainingRaw)
+    ? BigInt(remainingRaw).toString()
+    : "0";
+  return {
+    ref_id: record.ref_id,
+    vendor: typeof record.vendor === "string" ? record.vendor : "",
+    payee: typeof record.payee === "string" ? record.payee : "",
+    description: typeof record.description === "string" ? record.description : "",
+    remaining_yocto: remaining,
+    open: record.open !== false,
   };
 }
 
@@ -795,6 +1099,7 @@ export function createNearChainAdapter(
     return requireNearApi(await loadNearApi());
   }
   return {
+    contractId: opts.contractId,
     async getRequest(requestId: number): Promise<PaymentRequestShape | null> {
       const mod = await loadModule();
       const provider = new mod.JsonRpcProvider({
@@ -814,9 +1119,29 @@ export function createNearChainAdapter(
       if (parsed === null || parsed === undefined) return null;
       return normalizeViewRequest(parsed);
     },
+    async getPurposeRef(refId: string): Promise<PurposeRefShape | null> {
+      const mod = await loadModule();
+      const provider = new mod.JsonRpcProvider({
+        url: resolveNearRpcUrl({ nodeUrl: opts.nodeUrl, networkId }),
+      });
+      const res = await provider.query({
+        request_type: "call_function",
+        account_id: opts.contractId,
+        method_name: "get_purpose_ref",
+        args_base64: Buffer.from(
+          JSON.stringify({ ref_id: refId }),
+        ).toString("base64"),
+        finality: "final",
+      });
+      const raw = Buffer.from(res.result).toString();
+      const parsed: unknown = raw === "" ? null : JSON.parse(raw);
+      if (parsed === null || parsed === undefined) return null;
+      return normalizePurposeRefView(parsed);
+    },
     async submitVerdict(
       requestId: number,
       consistent: boolean,
+      evidenceSha256: string,
       signatureBase58: string,
     ): Promise<{ status: string }> {
       const mod = await loadModule();
@@ -835,6 +1160,7 @@ export function createNearChainAdapter(
         args: {
           request_id: requestId,
           consistent,
+          evidence_sha256: evidenceSha256,
           signature_base58: signatureBase58,
         },
         gas: SUBMIT_VERDICT_GAS,

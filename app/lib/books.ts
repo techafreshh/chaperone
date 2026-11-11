@@ -5,6 +5,7 @@ export interface BookEntry {
   vendor: string;
   payee: string;
   cap_near: string;
+  description: string;
 }
 
 const YOCTO_DECIMALS = 24;

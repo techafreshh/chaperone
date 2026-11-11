@@ -12,14 +12,20 @@ describe("books ledger", () => {
     expect(entry?.vendor).toBe("CoreWeave");
   });
 
-  it("every entry has string id/vendor/payee/cap_near", () => {
+  it("every entry has string id/vendor/payee/cap_near/description", () => {
     for (const entry of listRefs()) {
       expect(typeof entry.id).toBe("string");
       expect(typeof entry.vendor).toBe("string");
       expect(typeof entry.payee).toBe("string");
       expect((entry.payee as string).length).toBeGreaterThan(0);
       expect(typeof entry.cap_near).toBe("string");
+      expect(typeof entry.description).toBe("string");
+      expect((entry.description as string).length).toBeGreaterThan(0);
     }
+  });
+
+  it("invoice-114 describes GPU hours", () => {
+    expect(getRef("invoice-114")?.description).toBe("GPU hours, October 2026");
   });
 
   it("every sample invoice binds one payee", () => {

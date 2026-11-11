@@ -79,6 +79,31 @@ describe("fixture probe strings", () => {
     expect(frozen).toBeDefined();
     expect(FIXTURE_QUEUE_REQUESTS).toHaveLength(2);
   });
+
+  it("shows the memo, the invoice description and the objection side by side", async () => {
+    const state = await getQueueState({
+      fetchImpl: throwingFetch(),
+      env: EMPTY_ENV,
+    });
+    const six = state.requests.find((row) => row.request_id === 6);
+    expect(six?.memo).toBe("Annual domain renewal");
+    expect(six?.description).toBe("GPU hours, October 2026");
+    expect(String(six?.reason ?? six?.objection ?? "").length).toBeGreaterThan(0);
+  });
+
+  it("normalizes stub memo and description fields", async () => {
+    const file = writeStubFile([
+      stubRow(7, { memo: "stub memo", description: "stub invoice" }),
+      { ...stubRow(8) },
+    ]);
+    const rows = loadStubQueue({ QUEUE_STUB_FILE: file });
+    const seven = rows?.find((row) => row.request_id === 7);
+    expect(seven?.memo).toBe("stub memo");
+    expect(seven?.description).toBe("stub invoice");
+    const eight = rows?.find((row) => row.request_id === 8);
+    expect(eight?.memo).toBe("");
+    expect(eight?.description).toBe("");
+  });
 });
 
 describe("loadStubQueue", () => {

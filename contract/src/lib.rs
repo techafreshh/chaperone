@@ -25,13 +25,13 @@ use request::{
     log_request_created, log_request_failed, log_request_rejected, PaymentOutcome, PaymentRequest,
     FAILED, HELD, PAID, PAYING, REASON_AGENT_INACTIVE, REASON_EXCEEDS_DAILY_ALLOWANCE,
     REASON_EXCEEDS_PER_PAYMENT_CAP, REASON_EXCEEDS_PURPOSE_REF_REMAINING, REASON_HOLD_REJECTED,
-    REASON_INSUFFICIENT_TREASURY, REASON_PAYEE_NOT_ALLOWLISTED, REASON_PURPOSE_REF_CLOSED,
-    REASON_PURPOSE_REF_NOT_FOUND, REASON_PURPOSE_REF_PAYEE_MISMATCH,
+    REASON_INSUFFICIENT_TREASURY, REASON_INVALID_MEMO, REASON_PAYEE_NOT_ALLOWLISTED,
+    REASON_PURPOSE_REF_CLOSED, REASON_PURPOSE_REF_NOT_FOUND, REASON_PURPOSE_REF_PAYEE_MISMATCH,
     REASON_PURPOSE_REF_VENDOR_MISMATCH, REASON_TRANSFER_FAILED, REJECTED, STAGED,
 };
 use verifier::{
-    canonical_verdict_payload, decode_signature, decode_verifier_key, log_request_held,
-    log_request_paid, log_verdict_recorded, log_verifier_set,
+    canonical_verdict_payload, decode_evidence_sha256, decode_signature, decode_verifier_key,
+    log_request_held, log_request_paid, log_verdict_recorded, log_verifier_set,
 };
 
 #[near(contract_state)]
@@ -203,7 +203,9 @@ impl Guard {
             .map(|key| bs58::encode(key).into_string())
     }
 
-    /// Agent intake for a payment: deterministic on-chain checks run in a
+    /// Agent intake for a payment: the stated `memo` (1..=280 UTF-8 bytes,
+    /// panics with `"Invalid memo"` otherwise) is stored and emitted before
+    /// any other check. Deterministic on-chain checks then run in a
     /// fixed order (active → per-payment cap → daily allowance → payee
     /// allowlist → ref exists → ref open → ref payee → ref vendor → ref
     /// remaining) before any judgment step. Failures are
@@ -218,7 +220,12 @@ impl Guard {
         amount_yocto: U128,
         purpose_ref: String,
         vendor: String,
+        memo: String,
     ) -> PaymentOutcome {
+        require!(
+            !memo.is_empty() && memo.as_bytes().len() <= 280,
+            REASON_INVALID_MEMO
+        );
         let agent_id = env::predecessor_account_id();
         let mut policy = self
             .agents
@@ -235,6 +242,7 @@ impl Guard {
                 amount_yocto,
                 purpose_ref,
                 vendor,
+                memo.clone(),
                 REASON_AGENT_INACTIVE,
             );
         }
@@ -247,6 +255,7 @@ impl Guard {
                 amount_yocto,
                 purpose_ref,
                 vendor,
+                memo.clone(),
                 REASON_EXCEEDS_PER_PAYMENT_CAP,
             );
         }
@@ -263,6 +272,7 @@ impl Guard {
                 amount_yocto,
                 purpose_ref,
                 vendor,
+                memo.clone(),
                 REASON_EXCEEDS_DAILY_ALLOWANCE,
             );
         }
@@ -275,6 +285,7 @@ impl Guard {
                 amount_yocto,
                 purpose_ref,
                 vendor,
+                memo.clone(),
                 REASON_PAYEE_NOT_ALLOWLISTED,
             );
         }
@@ -288,6 +299,7 @@ impl Guard {
                     amount_yocto,
                     purpose_ref,
                     vendor,
+                    memo.clone(),
                     REASON_PURPOSE_REF_NOT_FOUND,
                 );
             }
@@ -300,6 +312,7 @@ impl Guard {
                         amount_yocto,
                         purpose_ref,
                         vendor,
+                        memo.clone(),
                         REASON_PURPOSE_REF_CLOSED,
                     );
                 }
@@ -311,6 +324,7 @@ impl Guard {
                         amount_yocto,
                         purpose_ref,
                         vendor,
+                        memo.clone(),
                         REASON_PURPOSE_REF_PAYEE_MISMATCH,
                     );
                 }
@@ -322,6 +336,7 @@ impl Guard {
                         amount_yocto,
                         purpose_ref,
                         vendor,
+                        memo.clone(),
                         REASON_PURPOSE_REF_VENDOR_MISMATCH,
                     );
                 }
@@ -334,6 +349,7 @@ impl Guard {
                         amount_yocto,
                         purpose_ref,
                         vendor,
+                        memo.clone(),
                         REASON_EXCEEDS_PURPOSE_REF_REMAINING,
                     );
                 }
@@ -356,6 +372,7 @@ impl Guard {
             amount_yocto,
             purpose_ref,
             vendor,
+            memo,
             status: STAGED.to_string(),
             reason: None,
         };
@@ -370,8 +387,9 @@ impl Guard {
 
     /// Permissionless verdict intake: anyone may submit, but only a verdict
     /// carrying a valid Ed25519 signature from the registered verifier key
-    /// over the canonical payload moves a staged request — to `paying` when
-    /// consistent (the private `on_payout` callback settles
+    /// over the v2 canonical payload (PRD §10.1: contract-id, request,
+    /// memo hash and evidence hash bound) moves a staged request — to
+    /// `paying` when consistent (the private `on_payout` callback settles
     /// `paying -> paid | failed`), unless the logical treasury does not
     /// cover the amount — then the request waits in the queue as `held`
     /// with reason `InsufficientTreasury`. An inconsistent verdict holds
@@ -382,6 +400,7 @@ impl Guard {
         &mut self,
         request_id: u64,
         consistent: bool,
+        evidence_sha256: String,
         signature_base58: String,
     ) {
         let mut record = self
@@ -391,8 +410,14 @@ impl Guard {
             .expect("Request not found");
         require!(record.status == STAGED, "Request is not staged");
         let key = self.verifier_key.clone().expect("Verifier not registered");
+        let evidence = decode_evidence_sha256(&evidence_sha256);
         let signature = decode_signature(&signature_base58);
-        let payload = canonical_verdict_payload(&record, consistent);
+        let payload = canonical_verdict_payload(
+            &record,
+            &env::current_account_id(),
+            &evidence,
+            consistent,
+        );
         let key_bytes: [u8; 32] = key.try_into().expect("Invalid verifier public key");
         require!(
             env::ed25519_verify(&signature, &payload, &key_bytes),
@@ -603,6 +628,7 @@ impl Guard {
         amount_yocto: U128,
         purpose_ref: String,
         vendor: String,
+        memo: String,
         reason: &str,
     ) -> PaymentOutcome {
         let request_id = self.request_seq;
@@ -614,6 +640,7 @@ impl Guard {
             amount_yocto,
             purpose_ref,
             vendor,
+            memo,
             status: REJECTED.to_string(),
             reason: Some(reason.to_string()),
         };
@@ -677,8 +704,13 @@ impl Guard {
         vendor: String,
         payee: AccountId,
         max_amount_yocto: U128,
+        description: String,
     ) {
         self.assert_owner();
+        require!(
+            description.as_bytes().len() <= 280,
+            "Invalid description"
+        );
         assert!(
             !self.purpose_refs.contains_key(&ref_id),
             "Purpose ref already registered"
@@ -689,12 +721,13 @@ impl Guard {
                 vendor: vendor.clone(),
                 payee: payee.clone(),
                 max_amount_yocto,
+                description: description.clone(),
                 committed_yocto: U128::from(0),
                 paid_yocto: U128::from(0),
                 open: true,
             },
         );
-        log_purpose_ref_registered(&ref_id, &vendor, &payee, max_amount_yocto);
+        log_purpose_ref_registered(&ref_id, &vendor, &payee, max_amount_yocto, &description);
     }
 
     pub fn close_purpose_ref(&mut self, ref_id: String) {

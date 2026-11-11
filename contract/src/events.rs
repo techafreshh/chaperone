@@ -112,13 +112,15 @@ pub(crate) fn log_purpose_ref_registered(
     vendor: &str,
     payee: &AccountId,
     max_amount_yocto: U128,
+    description: &str,
 ) {
     let data = format!(
-        "{{\"ref_id\":\"{}\",\"vendor\":\"{}\",\"payee\":\"{}\",\"max_amount_yocto\":\"{}\"}}",
+        "{{\"ref_id\":\"{}\",\"vendor\":\"{}\",\"payee\":\"{}\",\"max_amount_yocto\":\"{}\",\"description\":\"{}\"}}",
         escape_json(ref_id),
         escape_json(vendor),
         escape_json(payee.as_str()),
-        max_amount_yocto.0
+        max_amount_yocto.0,
+        escape_json(description)
     );
     emit("purpose_ref_registered", &data);
 }
@@ -148,13 +150,14 @@ pub(crate) fn log_funds_withdrawn(to: &AccountId, amount_yocto: u128) {
 
 pub(crate) fn log_request_created(request: &PaymentRequest) {
     let data = format!(
-        "{{\"request_id\":{},\"agent_id\":\"{}\",\"payee\":\"{}\",\"amount_yocto\":\"{}\",\"purpose_ref\":\"{}\",\"vendor\":\"{}\"}}",
+        "{{\"request_id\":{},\"agent_id\":\"{}\",\"payee\":\"{}\",\"amount_yocto\":\"{}\",\"purpose_ref\":\"{}\",\"vendor\":\"{}\",\"memo\":\"{}\"}}",
         request.request_id,
         escape_json(request.agent_id.as_str()),
         escape_json(request.payee.as_str()),
         request.amount_yocto.0,
         escape_json(&request.purpose_ref),
-        escape_json(&request.vendor)
+        escape_json(&request.vendor),
+        escape_json(&request.memo)
     );
     emit("request_created", &data);
 }

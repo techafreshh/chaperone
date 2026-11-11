@@ -9,6 +9,8 @@ pub struct PurposeRef {
     pub vendor: String,
     pub payee: AccountId,
     pub max_amount_yocto: U128,
+    /// What the invoice or order is for (up to 280 UTF-8 bytes).
+    pub description: String,
     pub committed_yocto: U128,
     pub paid_yocto: U128,
     pub open: bool,
@@ -37,6 +39,7 @@ pub struct PurposeRefView {
     pub committed_yocto: U128,
     pub paid_yocto: U128,
     pub remaining_yocto: U128,
+    pub description: String,
     pub open: bool,
 }
 
@@ -51,6 +54,7 @@ impl PurposeRefView {
             committed_yocto: r.committed_yocto,
             paid_yocto: r.paid_yocto,
             remaining_yocto: U128::from(remaining),
+            description: r.description.clone(),
             open: r.open,
         }
     }
@@ -95,6 +99,7 @@ mod tests {
             "CoreWeave".to_string(),
             "payee.near".parse().unwrap(),
             U128::from(30_000_000_000_000_000_000_000_000u128),
+            "Test invoice description".to_string(),
         );
 
         let view = guard
@@ -121,6 +126,7 @@ mod tests {
             "CoreWeave".to_string(),
             "payee.near".parse().unwrap(),
             U128::from(30_000_000_000_000_000_000_000_000u128),
+            "Test invoice description".to_string(),
         );
 
         guard.close_purpose_ref("invoice-114".to_string());
@@ -146,12 +152,14 @@ mod tests {
             "CoreWeave".to_string(),
             "payee.near".parse().unwrap(),
             U128::from(30_000_000_000_000_000_000_000_000u128),
+            "Test invoice description".to_string(),
         );
         guard.register_purpose_ref(
             "order-7".to_string(),
             "Lambda".to_string(),
             "other.near".parse().unwrap(),
             U128::from(1_000_000_000_000_000_000_000_000u128),
+            "Test invoice description".to_string(),
         );
 
         let refs = guard.list_purpose_refs();
@@ -170,12 +178,14 @@ mod tests {
             "CoreWeave".to_string(),
             "payee.near".parse().unwrap(),
             U128::from(30_000_000_000_000_000_000_000_000u128),
+            "Test invoice description".to_string(),
         );
         guard.register_purpose_ref(
             "invoice-114".to_string(),
             "CoreWeave".to_string(),
             "payee.near".parse().unwrap(),
             U128::from(30_000_000_000_000_000_000_000_000u128),
+            "Test invoice description".to_string(),
         );
     }
 
@@ -194,6 +204,7 @@ mod tests {
             "CoreWeave".to_string(),
             "payee.near".parse().unwrap(),
             U128::from(30_000_000_000_000_000_000_000_000u128),
+            "Test invoice description".to_string(),
         );
 
         set_predecessor("mallory.near");
@@ -203,6 +214,7 @@ mod tests {
                 "Evil".to_string(),
                 "evil.near".parse().unwrap(),
                 U128::from(1u128),
+                "Test invoice description".to_string(),
             );
         }));
         assert!(register.is_err(), "non-owner register_purpose_ref must panic");
@@ -221,6 +233,7 @@ mod tests {
             "CoreWeave".to_string(),
             "payee.near".parse().unwrap(),
             U128::from(30_000_000_000_000_000_000_000_000u128),
+            "Test invoice description".to_string(),
         );
 
         set_predecessor("anyone.near");
@@ -230,5 +243,34 @@ mod tests {
         assert!(view.open);
         assert_eq!(guard.list_purpose_refs().len(), 1);
         assert!(guard.get_purpose_ref("ghost-ref".to_string()).is_none());
+    }
+
+    #[test]
+    fn description_is_stored_and_returned() {
+        let mut guard = fresh_guard();
+        guard.register_purpose_ref(
+            "invoice-114".to_string(),
+            "CoreWeave".to_string(),
+            "payee.near".parse().unwrap(),
+            U128::from(30_000_000_000_000_000_000_000_000u128),
+            "GPU hours, October 2026".to_string(),
+        );
+        let view = guard
+            .get_purpose_ref("invoice-114".to_string())
+            .expect("views must be public");
+        assert_eq!(view.description, "GPU hours, October 2026".to_string());
+    }
+
+    #[test]
+    #[should_panic(expected = "Invalid description")]
+    fn overlong_description_panics() {
+        let mut guard = fresh_guard();
+        guard.register_purpose_ref(
+            "invoice-114".to_string(),
+            "CoreWeave".to_string(),
+            "payee.near".parse().unwrap(),
+            U128::from(30_000_000_000_000_000_000_000_000u128),
+            "x".repeat(281),
+        );
     }
 }

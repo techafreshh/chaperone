@@ -38,6 +38,8 @@ pub(crate) const REASON_PAYEE_NOT_ALLOWLISTED: &str = "PayeeNotAllowlisted";
 pub(crate) const REASON_PURPOSE_REF_NOT_FOUND: &str = "PurposeRefNotFound";
 /// Rejection reason for requests citing a closed purpose ref.
 pub(crate) const REASON_PURPOSE_REF_CLOSED: &str = "PurposeRefClosed";
+/// Panic message for `request_payment` memos outside 1..=280 UTF-8 bytes.
+pub(crate) const REASON_INVALID_MEMO: &str = "Invalid memo";
 /// Rejection reason for requests naming a purpose ref bound to a different payee.
 pub(crate) const REASON_PURPOSE_REF_PAYEE_MISMATCH: &str = "PurposeRefPayeeMismatch";
 /// Rejection reason for requests whose vendor differs from the ref's vendor.
@@ -57,6 +59,8 @@ pub struct PaymentRequest {
     pub amount_yocto: U128,
     pub purpose_ref: String,
     pub vendor: String,
+    /// Agent's stated reason for the payment (1..=280 UTF-8 bytes).
+    pub memo: String,
     pub status: String,
     pub reason: Option<String>,
 }
@@ -122,6 +126,7 @@ mod tests {
                     "Vendor".to_string(),
                     "payee.near".parse().unwrap(),
                     U128::from(1_000 * ONE_NEAR),
+                    "Test invoice description".to_string(),
                 );
             }
         }
@@ -137,6 +142,7 @@ mod tests {
             U128::from(amount),
             "ref-1".to_string(),
             "Vendor".to_string(),
+            "Test payment memo".to_string(),
         )
     }
 
@@ -267,6 +273,7 @@ mod tests {
             U128::from(5 * ONE_NEAR),
             "ref-2".to_string(),
             "Vendor".to_string(),
+            "Test payment memo".to_string(),
         );
         assert_eq!(outcome.status, STAGED);
     }
@@ -289,6 +296,7 @@ mod tests {
             "CoreWeave".to_string(),
             "good.near".parse().unwrap(),
             U128::from(50 * ONE_NEAR),
+            "Test invoice description".to_string(),
         );
         guard
     }
@@ -309,6 +317,7 @@ mod tests {
             U128::from(amount),
             purpose_ref.to_string(),
             "CoreWeave".to_string(),
+            "Test payment memo".to_string(),
         )
     }
 
@@ -504,6 +513,7 @@ mod tests {
             "CoreWeave".to_string(),
             "good.near".parse().unwrap(),
             U128::from(30 * ONE_NEAR),
+            "Test invoice description".to_string(),
         );
 
         // 50N fits the agent cap and allowance but exceeds the 30N ref
@@ -540,6 +550,7 @@ mod tests {
             "CoreWeave".to_string(),
             PAYEE_A.parse().unwrap(),
             U128::from(50 * ONE_NEAR),
+            "Test invoice description".to_string(),
         );
         guard
     }
@@ -560,6 +571,7 @@ mod tests {
             U128::from(amount),
             "invoice-114".to_string(),
             vendor.to_string(),
+            "Test payment memo".to_string(),
         )
     }
 
@@ -636,9 +648,9 @@ mod tests {
         // Hold via an inconsistent verdict (anyone may submit).
         set_predecessor("anyone.near");
         let record = guard.get_request(staged.request_id).expect("staged");
-        let payload = crate::verifier::canonical_verdict_payload(&record, false);
+        let payload = crate::verifier::canonical_verdict_payload(&record, &near_sdk::env::current_account_id(), &crate::verifier::decode_evidence_sha256("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"), false);
         let sig = bs58::encode(signing.sign(&payload).to_bytes()).into_string();
-        guard.submit_verdict(staged.request_id, false, sig);
+        guard.submit_verdict(staged.request_id, false, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(), sig);
         assert_eq!(guard.get_request(staged.request_id).expect("held").status, HELD);
         // Still committed while held.
         assert_eq!(
@@ -673,9 +685,9 @@ mod tests {
         assert_eq!(first.status, STAGED);
         set_predecessor("anyone.near");
         let record = guard.get_request(first.request_id).expect("staged");
-        let payload = crate::verifier::canonical_verdict_payload(&record, true);
+        let payload = crate::verifier::canonical_verdict_payload(&record, &near_sdk::env::current_account_id(), &crate::verifier::decode_evidence_sha256("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"), true);
         let sig = bs58::encode(signing.sign(&payload).to_bytes()).into_string();
-        guard.submit_verdict(first.request_id, true, sig);
+        guard.submit_verdict(first.request_id, true, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(), sig);
         assert_eq!(guard.get_request(first.request_id).expect("paying").status, PAYING);
         guard.settle_payout(first.request_id, true);
         let view = guard.get_purpose_ref("invoice-114".to_string()).expect("ref");
@@ -691,9 +703,9 @@ mod tests {
         assert_eq!(third.status, STAGED);
         set_predecessor("anyone.near");
         let record = guard.get_request(third.request_id).expect("staged");
-        let payload = crate::verifier::canonical_verdict_payload(&record, true);
+        let payload = crate::verifier::canonical_verdict_payload(&record, &near_sdk::env::current_account_id(), &crate::verifier::decode_evidence_sha256("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"), true);
         let sig = bs58::encode(signing.sign(&payload).to_bytes()).into_string();
-        guard.submit_verdict(third.request_id, true, sig);
+        guard.submit_verdict(third.request_id, true, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(), sig);
         guard.settle_payout(third.request_id, true);
         let view = guard.get_purpose_ref("invoice-114".to_string()).expect("ref");
         assert_eq!(view.paid_yocto, U128::from(50 * ONE_NEAR));
@@ -719,9 +731,9 @@ mod tests {
         assert_eq!(staged.status, STAGED);
         set_predecessor("anyone.near");
         let record = guard.get_request(staged.request_id).expect("staged");
-        let payload = crate::verifier::canonical_verdict_payload(&record, true);
+        let payload = crate::verifier::canonical_verdict_payload(&record, &near_sdk::env::current_account_id(), &crate::verifier::decode_evidence_sha256("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"), true);
         let sig = bs58::encode(signing.sign(&payload).to_bytes()).into_string();
-        guard.submit_verdict(staged.request_id, true, sig);
+        guard.submit_verdict(staged.request_id, true, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(), sig);
         assert_eq!(guard.get_request(staged.request_id).expect("paying").status, PAYING);
         guard.settle_payout(staged.request_id, false);
         let view = guard.get_purpose_ref("invoice-114".to_string()).expect("ref");
@@ -807,5 +819,54 @@ mod tests {
         assert!(empty.is_empty());
         let none = guard.list_requests(0, 0);
         assert!(none.is_empty());
+    }
+
+    fn request_memo(
+        guard: &mut Guard,
+        caller: &str,
+        memo: &str,
+    ) -> PaymentOutcome {
+        let context = VMContextBuilder::new()
+            .predecessor_account_id(caller.parse().unwrap())
+            .build();
+        testing_env!(context);
+        guard.request_payment(
+            "good.near".parse().unwrap(),
+            U128::from(FIVE_NEAR),
+            "invoice-114".to_string(),
+            "CoreWeave".to_string(),
+            memo.to_string(),
+        )
+    }
+
+    #[test]
+    #[should_panic(expected = "Invalid memo")]
+    fn empty_memo_panics_with_invalid_memo() {
+        let mut guard = issue4_guard();
+        request_memo(&mut guard, "agent.near", "");
+    }
+
+    #[test]
+    #[should_panic(expected = "Invalid memo")]
+    fn overlong_memo_panics_with_invalid_memo() {
+        let mut guard = issue4_guard();
+        request_memo(&mut guard, "agent.near", &"x".repeat(281));
+    }
+
+    #[test]
+    fn boundary_memos_stage_and_store() {
+        let mut guard = issue4_guard();
+        let one = request_memo(&mut guard, "agent.near", "x");
+        assert_eq!(one.status, STAGED);
+        assert_eq!(
+            guard.get_request(one.request_id).expect("stored").memo,
+            "x".to_string()
+        );
+        let full = request_memo(&mut guard, "agent.near", &"y".repeat(280));
+        assert_eq!(full.status, STAGED);
+        assert_eq!(
+            guard.get_request(full.request_id).expect("stored").memo,
+            "y".repeat(280)
+        );
     }
 }

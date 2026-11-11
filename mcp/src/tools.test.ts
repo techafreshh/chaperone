@@ -53,6 +53,7 @@ describe("request_payment", () => {
         amount_near: "400",
         purpose_ref: "invoice-114",
         vendor: "X",
+        memo: "GPU hours, October 2026",
       },
       deps(),
     );
@@ -69,6 +70,7 @@ describe("request_payment", () => {
         amount_near: "0.5",
         purpose_ref: "invoice-114",
         vendor: "CoreWeave",
+        memo: "GPU hours, October 2026",
       },
       deps(),
     );
@@ -89,6 +91,7 @@ describe("request_payment", () => {
         amount_near: "1",
         purpose_ref: "invoice-114",
         vendor: "CoreWeave",
+        memo: "GPU hours, October 2026",
       },
       { env: {}, adapter },
     );
@@ -105,6 +108,7 @@ describe("request_payment", () => {
         amount_near: "1",
         purpose_ref: "invoice-114",
         vendor: "Coreweave",
+        memo: "GPU hours, October 2026",
       },
       deps(),
     );
@@ -125,6 +129,7 @@ describe("request_payment", () => {
         amount_near: "10",
         purpose_ref: "order-009",
         vendor: "Nebius",
+        memo: "GPU hours, October 2026",
       },
       { env: {}, adapter },
     );
@@ -140,6 +145,7 @@ describe("request_payment", () => {
           amount_near: "5",
           purpose_ref: "invoice-114",
           vendor: "CoreWeave",
+          memo: "GPU hours, October 2026",
         },
         { env: {}, adapter },
       );
@@ -152,11 +158,60 @@ describe("request_payment", () => {
         amount_near: "10",
         purpose_ref: "invoice-114",
         vendor: "CoreWeave",
+        memo: "GPU hours, October 2026",
       },
       { env: {}, adapter },
     );
     expect((second.structuredContent as Record<string, unknown>).status).toBe("rejected");
     expect((second.structuredContent as Record<string, unknown>).reason).toBe("ExceedsPurposeRefRemaining");
+  });
+
+  it("fails with Invalid memo when the memo is missing", async () => {
+    const result = await requestPayment(
+      {
+        payee: "good.near",
+        amount_near: "1",
+        purpose_ref: "invoice-114",
+        vendor: "CoreWeave",
+      },
+      deps(),
+    );
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.structuredContent)).toContain("Invalid memo");
+  });
+
+  it("fails with Invalid memo when the memo is empty or over 280 bytes", async () => {
+    for (const memo of ["", "x".repeat(281)]) {
+      const result = await requestPayment(
+        {
+          payee: "good.near",
+          amount_near: "1",
+          purpose_ref: "invoice-114",
+          vendor: "CoreWeave",
+          memo,
+        },
+        deps(),
+      );
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result.structuredContent)).toContain("Invalid memo");
+    }
+  });
+
+  it("stages with a 280-byte memo", async () => {
+    const result = await requestPayment(
+      {
+        payee: "good.near",
+        amount_near: "1",
+        purpose_ref: "invoice-114",
+        vendor: "CoreWeave",
+        memo: "y".repeat(280),
+      },
+      deps(),
+    );
+    expect(result.isError).toBeUndefined();
+    expect((result.structuredContent as Record<string, unknown>).status).toBe(
+      "staged",
+    );
   });
 });
 
@@ -170,6 +225,24 @@ describe("pending", () => {
     const row = body.pending.find((entry) => entry.request_id === 6);
     expect(row).toBeDefined();
     expect(typeof row?.objection).toBe("string");
+    expect((row?.objection as string).length).toBeGreaterThan(0);
+  });
+
+  it("shows the memo, the invoice description and the objection side by side", async () => {
+    const result = await pending({}, deps());
+    expect(result.isError).toBeUndefined();
+    const body = result.structuredContent as {
+      pending: {
+        request_id: number;
+        memo: string;
+        description: string;
+        objection: string;
+      }[];
+    };
+    const row = body.pending.find((entry) => entry.request_id === 6);
+    expect(row).toBeDefined();
+    expect(row?.memo).toBe("Annual domain renewal");
+    expect(row?.description).toBe("GPU hours, October 2026");
     expect((row?.objection as string).length).toBeGreaterThan(0);
   });
 });
@@ -213,6 +286,7 @@ describe("payout status vocabulary", () => {
       amount_yocto: "5000000000000000000000000",
       purpose_ref: "invoice-114",
       vendor: "CoreWeave",
+      memo: "GPU hours, October 2026",
       status: STATUS_PAYING,
       reason: null,
     });
@@ -223,6 +297,7 @@ describe("payout status vocabulary", () => {
       amount_yocto: "5000000000000000000000000",
       purpose_ref: "invoice-114",
       vendor: "CoreWeave",
+      memo: "GPU hours, October 2026",
       status: STATUS_FAILED,
       reason: REASON_TRANSFER_FAILED,
     });

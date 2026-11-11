@@ -1,6 +1,6 @@
 [
-  { "id": "invoice-114", "vendor": "CoreWeave", "payee": "good.testnet", "cap_near": "30" },
-  { "id": "invoice-115", "vendor": "Lambda", "payee": "good.testnet", "cap_near": "12" },
-  { "id": "order-008", "vendor": "Crusoe", "payee": "good.testnet", "cap_near": "8" },
-  { "id": "order-009", "vendor": "Nebius", "payee": "good.testnet", "cap_near": "5" }
+  { "id": "invoice-114", "vendor": "CoreWeave", "payee": "good.testnet", "cap_near": "30", "description": "GPU hours, October 2026" },
+  { "id": "invoice-115", "vendor": "Lambda", "payee": "good.testnet", "cap_near": "12", "description": "Inference capacity, November 2026" },
+  { "id": "order-008", "vendor": "Crusoe", "payee": "good.testnet", "cap_near": "8", "description": "Crusoe cloud burst, Q4 2026" },
+  { "id": "order-009", "vendor": "Nebius", "payee": "good.testnet", "cap_near": "5", "description": "Nebius training run, October 2026" }
 ]

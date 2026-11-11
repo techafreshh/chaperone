@@ -93,6 +93,7 @@ export interface StoredRequest {
   amount_yocto: string;
   purpose_ref: string;
   vendor: string;
+  memo: string;
   status: string;
   reason?: string | null;
 }
@@ -104,6 +105,8 @@ export interface PendingRow {
   amount_yocto: string;
   purpose_ref: string;
   vendor: string;
+  memo: string;
+  description: string;
   objection: string;
 }
 
@@ -156,6 +159,7 @@ interface FixtureAgent {
 interface FixturePurposeRef {
   vendor: string;
   payee: string;
+  description: string;
   max_amount_yocto: string;
   committed_yocto: string;
   paid_yocto: string;
@@ -237,10 +241,10 @@ export function createFixtureStore(): FixtureStore {
   // remaining is 20 NEAR. Other refs start uncommitted.
   const seededCommitted = (30n * 10n ** 24n).toString();
   const refs = new Map<string, FixturePurposeRef>([
-    ["invoice-114", { vendor: "CoreWeave", payee: "good.near", max_amount_yocto: NEAR_50, committed_yocto: seededCommitted, paid_yocto: "0", open: true }],
-    ["invoice-115", { vendor: "Lambda", payee: "good.near", max_amount_yocto: NEAR_12, committed_yocto: "0", paid_yocto: "0", open: true }],
-    ["order-008", { vendor: "Crusoe", payee: "good.near", max_amount_yocto: NEAR_8, committed_yocto: "0", paid_yocto: "0", open: true }],
-    ["order-009", { vendor: "Nebius", payee: "good.near", max_amount_yocto: NEAR_5, committed_yocto: "0", paid_yocto: "0", open: true }],
+    ["invoice-114", { vendor: "CoreWeave", payee: "good.near", description: "GPU hours, October 2026", max_amount_yocto: NEAR_50, committed_yocto: seededCommitted, paid_yocto: "0", open: true }],
+    ["invoice-115", { vendor: "Lambda", payee: "good.near", description: "Inference capacity, November 2026", max_amount_yocto: NEAR_12, committed_yocto: "0", paid_yocto: "0", open: true }],
+    ["order-008", { vendor: "Crusoe", payee: "good.near", description: "Crusoe cloud burst, Q4 2026", max_amount_yocto: NEAR_8, committed_yocto: "0", paid_yocto: "0", open: true }],
+    ["order-009", { vendor: "Nebius", payee: "good.near", description: "Nebius training run, October 2026", max_amount_yocto: NEAR_5, committed_yocto: "0", paid_yocto: "0", open: true }],
   ]);
   const requests = new Map<number, StoredRequest>();
   for (const id of [1, 2, 3, 4, 5]) {
@@ -251,6 +255,7 @@ export function createFixtureStore(): FixtureStore {
       amount_yocto: FIVE_NEAR_YOCTO,
       purpose_ref: "invoice-114",
       vendor: "CoreWeave",
+      memo: "GPU hours, October 2026",
       status: STATUS_STAGED,
       reason: null,
     });
@@ -262,6 +267,7 @@ export function createFixtureStore(): FixtureStore {
     amount_yocto: FIVE_NEAR_YOCTO,
     purpose_ref: "invoice-114",
     vendor: "CoreWeave",
+    memo: "Annual domain renewal",
     status: STATUS_HELD,
     reason: "reason mismatch",
   });
@@ -282,6 +288,7 @@ export interface RequestPaymentInput {
   amountYocto: string;
   purposeRef: string;
   vendor: string;
+  memo: string;
 }
 
 export interface ChainAdapter {
@@ -290,6 +297,7 @@ export interface ChainAdapter {
   listHeld(): Promise<StoredRequest[]>;
   getRequest(requestId: number): Promise<StoredRequest | null>;
   objectionFor(requestId: number): string | null;
+  describePurposeRef?(refId: string): Promise<string | null>;
 }
 
 export type Env = Record<string, string | undefined>;
@@ -318,6 +326,11 @@ function fixtureSubmit(
 ): PaymentOutcome {
   const agent = store.agents.get(input.agentId);
   if (agent === undefined) throw new Error(`Agent not registered: ${input.agentId}`);
+  // Mirror the contract's `Invalid memo` panic: 1..=280 UTF-8 bytes.
+  const memoBytes = Buffer.byteLength(input.memo, "utf8");
+  if (input.memo.length === 0 || memoBytes > 280) {
+    throw new Error("Invalid memo");
+  }
   const amount = BigInt(input.amountYocto);
   const record = (
     status: string,
@@ -332,6 +345,7 @@ function fixtureSubmit(
       amount_yocto: amount.toString(),
       purpose_ref: input.purposeRef,
       vendor: input.vendor,
+      memo: input.memo,
       status,
       reason,
     });
@@ -390,6 +404,9 @@ export function createFixtureAdapter(store?: FixtureStore): ChainAdapter {
     },
     objectionFor(requestId: number): string | null {
       return state.objections.get(requestId) ?? null;
+    },
+    async describePurposeRef(refId: string): Promise<string | null> {
+      return state.refs.get(refId)?.description ?? null;
     },
   };
 }
@@ -486,6 +503,7 @@ function normalizeStoredRequest(raw: unknown): StoredRequest | null {
     amount_yocto: amount,
     purpose_ref: typeof record.purpose_ref === "string" ? record.purpose_ref : "",
     vendor: typeof record.vendor === "string" ? record.vendor : "",
+    memo: typeof record.memo === "string" ? record.memo : "",
     status: record.status,
     reason: typeof record.reason === "string" ? record.reason : null,
   };
@@ -630,6 +648,7 @@ export function createLiveAdapter(env: Env, fallback?: ChainAdapter): ChainAdapt
             amount_yocto: input.amountYocto,
             purpose_ref: input.purposeRef,
             vendor: input.vendor,
+            memo: input.memo,
           },
           gas: BigInt("100000000000000"),
         });
@@ -672,6 +691,24 @@ export function createLiveAdapter(env: Env, fallback?: ChainAdapter): ChainAdapt
     },
     objectionFor(requestId: number): string | null {
       return backup.objectionFor(requestId);
+    },
+    async describePurposeRef(refId: string): Promise<string | null> {
+      try {
+        const raw = await rpcCallFunction(rpcUrl, contractId, "get_purpose_ref", {
+          ref_id: refId,
+        });
+        if (raw !== null && typeof raw === "object") {
+          const description = (raw as Record<string, unknown>).description;
+          if (typeof description === "string") return description;
+        }
+      } catch {
+        // Fall through to the fixture backup below.
+      }
+      try {
+        return await backup.describePurposeRef?.(refId) ?? null;
+      } catch {
+        return null;
+      }
     },
   };
 }
@@ -758,15 +795,18 @@ export async function policyGet(
   });
 }
 
-// `request_payment {payee, amount_near, purpose_ref, vendor, agent_id?}` ->
-// the on-chain `PaymentOutcome` verbatim, including `reason`. Unknown
-// agents are tool errors (the contract panics `Agent not registered`).
+// `request_payment {payee, amount_near, purpose_ref, vendor, memo, agent_id?}` ->
+// the on-chain `PaymentOutcome` verbatim, including `reason`. The memo is
+// required (1..=280 UTF-8 bytes, mirroring the contract's `Invalid memo`
+// panic). Unknown agents are tool errors (the contract panics
+// `Agent not registered`).
 export async function requestPayment(
   input: {
     payee?: unknown;
     amount_near?: unknown;
     purpose_ref?: unknown;
     vendor?: unknown;
+    memo?: unknown;
     agent_id?: unknown;
   },
   deps?: ToolDeps,
@@ -785,6 +825,12 @@ export async function requestPayment(
   if (typeof input.vendor !== "string" || input.vendor.trim() === "") {
     return fail("vendor is required");
   }
+  if (typeof input.memo !== "string" || input.memo.length === 0) {
+    return fail("Invalid memo: memo is required");
+  }
+  if (Buffer.byteLength(input.memo, "utf8") > 280) {
+    return fail("Invalid memo: memo must be at most 280 bytes");
+  }
   let amountYocto: string;
   try {
     if (typeof input.amount_near !== "string") throw new Error("amount_near must be a decimal string");
@@ -800,6 +846,7 @@ export async function requestPayment(
       amountYocto,
       purposeRef: (input.purpose_ref as string).trim(),
       vendor: (input.vendor as string).trim(),
+      memo: input.memo as string,
     });
   } catch (error) {
     return fail(error instanceof Error ? error.message : String(error));
@@ -811,14 +858,28 @@ export async function requestPayment(
   );
 }
 
-// `pending {}` -> held rows merged with the judge objection memory, so
-// every row carries a non-empty `objection` (the contract stores none).
+// `pending {}` -> held rows with the memo, the invoice description and
+// the judge objection side by side, so every row carries a non-empty
+// `objection` (the contract stores none).
 export async function pending(
   _input: Record<string, unknown>,
   deps?: ToolDeps,
 ): Promise<ToolResult> {
   const { adapter } = depsOf(deps);
   const rows = await adapter.listHeld();
+  const descriptions = new Map<string, string>();
+  if (typeof adapter.describePurposeRef === "function") {
+    for (const row of rows) {
+      if (!descriptions.has(row.purpose_ref)) {
+        try {
+          const description = await adapter.describePurposeRef(row.purpose_ref);
+          descriptions.set(row.purpose_ref, description ?? "");
+        } catch {
+          descriptions.set(row.purpose_ref, "");
+        }
+      }
+    }
+  }
   return ok({
     pending: rows.map((row) => ({
       request_id: row.request_id,
@@ -827,6 +888,8 @@ export async function pending(
       amount_yocto: row.amount_yocto,
       purpose_ref: row.purpose_ref,
       vendor: row.vendor,
+      memo: row.memo,
+      description: descriptions.get(row.purpose_ref) ?? "",
       objection:
         adapter.objectionFor(row.request_id) ??
         (typeof row.reason === "string" && row.reason !== "" ? row.reason : null) ??
