@@ -136,13 +136,18 @@ export function mapPaymentRequest(record) {
   };
 }
 
-// Derive the `verdicts` row for a terminal request. `consistent` is
-// `status === "paid"`. Documented assumption: an `approve_hold` release
-// (paid with no on-chain verdict) mirrors as `consistent: true`, since the
-// views do not expose whether the paid state came from a verdict or a
-// hold release.
+// Derive the `verdicts` row for a decided request. `paid`, `paying`
+// and `failed` all mirror as `consistent: true`: `paying` only follows
+// a consistent verdict or an `approve_hold` release (the views do not
+// expose which), and `failed` is a consistent verdict whose transfer
+// bounced. Documented assumption: an `approve_hold` release (paid with
+// no on-chain verdict) mirrors as `consistent: true` for the same reason.
 export function deriveVerdict(record) {
-  if (record.status === "paid") {
+  if (
+    record.status === "paid" ||
+    record.status === "paying" ||
+    record.status === "failed"
+  ) {
     return { request_id: Number(record.request_id), consistent: true };
   }
   if (record.status === "held") {
@@ -188,6 +193,28 @@ export function deriveAudits(record) {
       created,
       { event: "verdict_recorded", subject, ...base, data: { consistent: true } },
       { event: "request_paid", subject, ...base, data: {} },
+    ];
+  }
+  // In-flight payout: the consistent verdict is on record, the transfer
+  // outcome is not yet known, so no outcome event is mirrored.
+  if (record.status === "paying") {
+    return [
+      created,
+      { event: "verdict_recorded", subject, ...base, data: { consistent: true } },
+    ];
+  }
+  // Bounced transfer: the consistent verdict stands, the outcome is the
+  // contract's `request_failed` envelope 1:1.
+  if (record.status === "failed") {
+    return [
+      created,
+      { event: "verdict_recorded", subject, ...base, data: { consistent: true } },
+      {
+        event: "request_failed",
+        subject,
+        ...base,
+        data: { reason: record.reason ?? null },
+      },
     ];
   }
   if (record.status === "held") {

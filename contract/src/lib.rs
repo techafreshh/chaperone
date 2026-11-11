@@ -1,6 +1,6 @@
 use near_sdk::json_types::U128;
 use near_sdk::near;
-use near_sdk::{NearToken, Promise};
+use near_sdk::{Gas, NearToken, Promise};
 // UnorderedMap is mandated by the issue contract (owner-gated registry
 // with `list_agents`); the sdk deprecation in favour of IterableMap is
 // acknowledged and intentionally not followed (no migration path needed
@@ -22,10 +22,11 @@ use policy::{
     refresh_day, AgentPolicy, AgentView,
 };
 use request::{
-    log_request_created, log_request_rejected, PaymentOutcome, PaymentRequest, HELD, PAID,
-    REASON_AGENT_INACTIVE, REASON_EXCEEDS_DAILY_ALLOWANCE, REASON_EXCEEDS_PER_PAYMENT_CAP,
-    REASON_EXCEEDS_PURPOSE_REF_CAP, REASON_HOLD_REJECTED, REASON_PAYEE_NOT_ALLOWLISTED,
-    REASON_PURPOSE_REF_CLOSED, REASON_PURPOSE_REF_NOT_FOUND, REJECTED, STAGED,
+    log_request_created, log_request_failed, log_request_rejected, PaymentOutcome, PaymentRequest,
+    FAILED, HELD, PAID, PAYING, REASON_AGENT_INACTIVE, REASON_EXCEEDS_DAILY_ALLOWANCE,
+    REASON_EXCEEDS_PER_PAYMENT_CAP, REASON_EXCEEDS_PURPOSE_REF_CAP, REASON_HOLD_REJECTED,
+    REASON_INSUFFICIENT_TREASURY, REASON_PAYEE_NOT_ALLOWLISTED, REASON_PURPOSE_REF_CLOSED,
+    REASON_PURPOSE_REF_NOT_FOUND, REASON_TRANSFER_FAILED, REJECTED, STAGED,
 };
 use verifier::{
     canonical_verdict_payload, decode_signature, decode_verifier_key, log_request_held,
@@ -340,9 +341,14 @@ impl Guard {
 
     /// Permissionless verdict intake: anyone may submit, but only a verdict
     /// carrying a valid Ed25519 signature from the registered verifier key
-    /// over the canonical payload moves a staged request — to `paid` when
-    /// consistent, to `held` when not. Emits `verdict_recorded` plus
-    /// `request_paid` or `request_held`.
+    /// over the canonical payload moves a staged request — to `paying` when
+    /// consistent (the private `on_payout` callback settles
+    /// `paying -> paid | failed`), unless the logical treasury does not
+    /// cover the amount — then the request waits in the queue as `held`
+    /// with reason `InsufficientTreasury`. An inconsistent verdict holds
+    /// the request as before. Emits `verdict_recorded` plus `request_held`
+    /// on the hold paths; `paid` and `failed` outcomes are emitted by the
+    /// settlement callback.
     pub fn submit_verdict(
         &mut self,
         request_id: u64,
@@ -364,11 +370,19 @@ impl Guard {
             "Invalid verdict signature"
         );
         if consistent {
-            record.status = PAID.to_string();
-            record.reason = None;
-            self.requests.insert(request_id, record.clone());
-            log_verdict_recorded(request_id, true);
-            log_request_paid(&record);
+            if record.amount_yocto.0 > self.treasury_yocto {
+                record.status = HELD.to_string();
+                record.reason = Some(REASON_INSUFFICIENT_TREASURY.to_string());
+                self.requests.insert(request_id, record.clone());
+                log_verdict_recorded(request_id, true);
+                log_request_held(&record);
+            } else {
+                log_verdict_recorded(request_id, true);
+                // Fire-and-forget: the transfer + callback receipts
+                // execute whether or not the handle is returned.
+                let _payout = self.begin_payout(&mut record);
+                self.requests.insert(request_id, record.clone());
+            }
         } else {
             record.status = HELD.to_string();
             self.requests.insert(request_id, record.clone());
@@ -377,8 +391,12 @@ impl Guard {
         }
     }
 
-    /// Owner-only release of a held request: pays it and clears the reason.
-    /// Emits `request_paid`.
+    /// Owner-only release of a held request: starts a real transfer
+    /// (`held -> paying`; the private `on_payout` callback settles
+    /// `paying -> paid | failed`) and clears the reason. Panics with
+    /// `Insufficient treasury` when the logical treasury does not cover
+    /// the amount, leaving the request `held`. Emits `request_paid` on
+    /// success via the settlement callback.
     pub fn approve_hold(&mut self, request_id: u64) {
         self.assert_owner();
         let mut record = self
@@ -387,14 +405,19 @@ impl Guard {
             .cloned()
             .expect("Request not found");
         require!(record.status == HELD, "Request is not held");
-        record.status = PAID.to_string();
-        record.reason = None;
+        require!(
+            record.amount_yocto.0 <= self.treasury_yocto,
+            "Insufficient treasury"
+        );
+        // Fire-and-forget: the transfer + callback receipts execute
+        // whether or not the handle is returned.
+        let _payout = self.begin_payout(&mut record);
         self.requests.insert(request_id, record.clone());
-        log_request_paid(&record);
     }
 
     /// Owner-only rejection of a held request: records it as rejected with
-    /// reason `HoldRejected`. Emits `request_rejected`.
+    /// reason `HoldRejected` and releases the amount from the agent's
+    /// same-day spend (rejections never transfer). Emits `request_rejected`.
     pub fn reject_hold(&mut self, request_id: u64) {
         self.assert_owner();
         let mut record = self
@@ -406,7 +429,84 @@ impl Guard {
         record.status = REJECTED.to_string();
         record.reason = Some(REASON_HOLD_REJECTED.to_string());
         self.requests.insert(request_id, record.clone());
+        self.release_spend(&record.agent_id, record.amount_yocto.0);
         log_request_rejected(&record);
+    }
+
+    /// Debit the treasury, mark the request `paying`, and schedule the
+    /// transfer plus the private `on_payout` settlement callback. Callers
+    /// must have checked treasury coverage first; the debit saturates so
+    /// an (unreachable) shortfall can never underflow. The promise is
+    /// fire-and-forget: receipts scheduled during execution run whether
+    /// or not the caller returns the handle.
+    fn begin_payout(&mut self, record: &mut PaymentRequest) -> Promise {
+        let amount = record.amount_yocto.0;
+        self.treasury_yocto = self.treasury_yocto.saturating_sub(amount);
+        record.status = PAYING.to_string();
+        record.reason = None;
+        Promise::new(record.payee.clone())
+            .transfer(NearToken::from_yoctonear(amount))
+            .then(
+                Promise::new(env::current_account_id()).function_call(
+                    "on_payout".to_string(),
+                    format!("{{\"request_id\":{}}}", record.request_id).into_bytes(),
+                    NearToken::from_yoctonear(0),
+                    Gas::from_tgas(10),
+                ),
+            )
+    }
+
+    /// Private settlement callback for a `paying` transfer: the transfer
+    /// receipt is promise 0. Success marks the request `paid` and emits
+    /// `request_paid`; failure restores the treasury debit and the
+    /// agent's same-day spend, marks the request `failed` with reason
+    /// `TransferFailed`, and emits `request_failed`.
+    #[private]
+    pub fn on_payout(&mut self, request_id: u64) {
+        // Bounded read: a transfer receipt succeeds with empty data, so
+        // `max_len` 0 accepts exactly that and rejects anything longer.
+        let succeeded = env::promise_result_checked(0, 0).is_ok();
+        self.settle_payout(request_id, succeeded);
+    }
+
+    /// Shared settlement core so unit tests can cover both branches
+    /// without executing promises (the host mock cannot produce a
+    /// transfer result; the balance assertions belong in the sandbox
+    /// round trip instead).
+    fn settle_payout(&mut self, request_id: u64, succeeded: bool) {
+        let mut record = self
+            .requests
+            .get(&request_id)
+            .cloned()
+            .expect("Request not found");
+        require!(record.status == PAYING, "Request is not paying");
+        let amount = record.amount_yocto.0;
+        if succeeded {
+            record.status = PAID.to_string();
+            record.reason = None;
+            self.requests.insert(request_id, record.clone());
+            log_request_paid(&record);
+        } else {
+            record.status = FAILED.to_string();
+            record.reason = Some(REASON_TRANSFER_FAILED.to_string());
+            self.requests.insert(request_id, record.clone());
+            self.treasury_yocto = self.treasury_yocto.saturating_add(amount);
+            self.release_spend(&record.agent_id, amount);
+            log_request_failed(&record);
+        }
+    }
+
+    /// Give the amount back to the agent's same-day spend. Stale days are
+    /// left alone: past UTC midnight the effective spend is already zero,
+    /// so touching the stored counters would corrupt the new day.
+    fn release_spend(&mut self, agent_id: &AccountId, amount: u128) {
+        if let Some(mut policy) = self.agents.get(agent_id).cloned() {
+            if policy.last_spend_day == current_utc_day() {
+                policy.spent_today_yocto =
+                    U128::from(policy.spent_today_yocto.0.saturating_sub(amount));
+                self.agents.insert(agent_id.clone(), policy);
+            }
+        }
     }
 
     pub fn get_request(&self, request_id: u64) -> Option<PaymentRequest> {

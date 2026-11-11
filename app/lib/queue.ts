@@ -670,6 +670,9 @@ function parseQueueId(rawId: unknown): number | null {
 function contractErrorToStatus(message: string): number | null {
   if (message.includes("Request not found")) return 404;
   if (message.includes("Request is not held")) return 409;
+  // Underfunded approve: the contract leaves the request `held`, so the
+  // overlay below must not mark it paid — surface 409 instead.
+  if (message.includes("Insufficient treasury")) return 409;
   return null;
 }
 

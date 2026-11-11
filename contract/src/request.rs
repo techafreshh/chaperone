@@ -6,10 +6,22 @@ use near_sdk::AccountId;
 /// Stored status for a payment request that passed the active and
 /// allowance gates.
 pub(crate) const STAGED: &str = "staged";
+/// Stored status for a payment whose transfer is in flight: the treasury
+/// is debited and the private `on_payout` callback has not settled yet.
+pub(crate) const PAYING: &str = "paying";
 /// Stored status for a payment request the verifier judged consistent.
 pub(crate) const PAID: &str = "paid";
 /// Stored status for a payment request the verifier judged inconsistent.
 pub(crate) const HELD: &str = "held";
+/// Stored status for a payment whose transfer promise reported failure.
+pub(crate) const FAILED: &str = "failed";
+/// Hold reason when a consistent verdict cannot pay: the logical
+/// treasury does not cover the amount, so the request waits in the
+/// queue until the owner tops up and approves.
+pub(crate) const REASON_INSUFFICIENT_TREASURY: &str = "InsufficientTreasury";
+/// Failure reason when the transfer promise reports failure: the
+/// treasury debit and the agent's same-day spend are both restored.
+pub(crate) const REASON_TRANSFER_FAILED: &str = "TransferFailed";
 /// Rejection reason for a held request the owner declined to release.
 pub(crate) const REASON_HOLD_REJECTED: &str = "HoldRejected";
 /// Stored status for a payment request rejected at intake.
@@ -55,7 +67,9 @@ pub struct PaymentOutcome {
     pub reason: Option<String>,
 }
 
-pub(crate) use crate::events::{log_request_created, log_request_rejected};
+pub(crate) use crate::events::{
+    log_request_created, log_request_failed, log_request_rejected,
+};
 
 #[cfg(test)]
 mod tests {
@@ -294,8 +308,12 @@ mod tests {
     #[test]
     fn wire_strings_match_acceptance_contract() {
         assert_eq!(REJECTED, "rejected");
+        assert_eq!(PAYING, "paying");
+        assert_eq!(FAILED, "failed");
         assert_eq!(REASON_EXCEEDS_PER_PAYMENT_CAP, "ExceedsPerPaymentCap");
         assert_eq!(REASON_PAYEE_NOT_ALLOWLISTED, "PayeeNotAllowlisted");
+        assert_eq!(REASON_INSUFFICIENT_TREASURY, "InsufficientTreasury");
+        assert_eq!(REASON_TRANSFER_FAILED, "TransferFailed");
         assert!(
             REASON_PURPOSE_REF_NOT_FOUND.contains("PurposeRef"),
             "unknown-ref reason must contain PurposeRef"

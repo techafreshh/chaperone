@@ -1,7 +1,13 @@
 import { describe, expect, it, afterEach } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import {
   MIRROR_DISABLED_REASON,
+  STATUS_FAILED,
+  STATUS_PAYING,
   clampRequestsLimit,
+  getMergedRequests,
   getMirrorStatus,
   handleRequestsGet,
   listRequests,
@@ -101,6 +107,47 @@ describe("listRequests", () => {
     await expect(listRequests(5, failing, READY_ENV)).rejects.toThrow(
       /mirror request failed/,
     );
+  });
+});
+
+describe("payout statuses", () => {
+  it("pins the on-chain paying/failed strings", () => {
+    expect(STATUS_PAYING).toBe("paying");
+    expect(STATUS_FAILED).toBe("failed");
+  });
+
+  it("passes paying and failed rows through the merged feed with badges", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "supabase-"));
+    const file = path.join(dir, "stub.json");
+    fs.writeFileSync(
+      file,
+      JSON.stringify([
+        { request_id: 11, agent_id: "agent-1", status: "paying", reason: null },
+        {
+          request_id: 12,
+          agent_id: "agent-1",
+          status: "failed",
+          reason: "TransferFailed",
+        },
+      ]),
+    );
+    const throwing = (async () => {
+      throw new Error("must not be called");
+    }) as unknown as typeof fetch;
+    // No mirror credentials: the mirror tier falls through, the stub
+    // tier decides.
+    const rows = await getMergedRequests({
+      fetchImpl: throwing,
+      env: { REQUESTS_STUB_FILE: file },
+    });
+    const paying = rows.find((row) => row.request_id === 11);
+    expect(paying?.status).toBe("paying");
+    expect(["verified", "unverifiable", "deterministic-only"]).toContain(
+      paying?.badge,
+    );
+    const failed = rows.find((row) => row.request_id === 12);
+    expect(failed?.status).toBe("failed");
+    expect(failed?.reason).toBe("TransferFailed");
   });
 });
 

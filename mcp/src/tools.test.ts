@@ -1,9 +1,14 @@
 // Acceptance vectors for the MCP guard tools (fixture-only, no network).
 import { describe, expect, it } from "vitest";
 import {
+  REASON_INSUFFICIENT_TREASURY,
+  REASON_TRANSFER_FAILED,
+  STATUS_FAILED,
+  STATUS_PAYING,
   amountNearToYocto,
   attestations,
   createFixtureAdapter,
+  createFixtureStore,
   pending,
   policyGet,
   requestPayment,
@@ -107,5 +112,52 @@ describe("attestations", () => {
 describe("amount_near conversion", () => {
   it("converts 0.5 to exact yocto", async () => {
     expect(amountNearToYocto("0.5")).toBe("500000000000000000000000");
+  });
+});
+
+describe("payout status vocabulary", () => {
+  it("pins the on-chain paying/failed and reason strings verbatim", () => {
+    expect(STATUS_PAYING).toBe("paying");
+    expect(STATUS_FAILED).toBe("failed");
+    expect(REASON_INSUFFICIENT_TREASURY).toBe("InsufficientTreasury");
+    expect(REASON_TRANSFER_FAILED).toBe("TransferFailed");
+  });
+
+  it("surfaces paying and failed rows verbatim through the adapter", async () => {
+    const store = createFixtureStore();
+    store.requests.set(7, {
+      request_id: 7,
+      agent_id: "agent-1",
+      payee: "good.near",
+      amount_yocto: "5000000000000000000000000",
+      purpose_ref: "invoice-114",
+      vendor: "CoreWeave",
+      status: STATUS_PAYING,
+      reason: null,
+    });
+    store.requests.set(8, {
+      request_id: 8,
+      agent_id: "agent-1",
+      payee: "good.near",
+      amount_yocto: "5000000000000000000000000",
+      purpose_ref: "invoice-114",
+      vendor: "CoreWeave",
+      status: STATUS_FAILED,
+      reason: REASON_TRANSFER_FAILED,
+    });
+    const adapter = createFixtureAdapter(store);
+    expect((await adapter.getRequest(7))?.status).toBe("paying");
+    const failed = await adapter.getRequest(8);
+    expect(failed?.status).toBe("failed");
+    expect(failed?.reason).toBe("TransferFailed");
+    // Held-only pending never absorbs in-flight or bounced rows.
+    const result = await pending({}, { env: {}, adapter });
+    const ids = (
+      result.structuredContent as {
+        pending: { request_id: number }[];
+      }
+    ).pending.map((entry) => entry.request_id);
+    expect(ids).not.toContain(7);
+    expect(ids).not.toContain(8);
   });
 });
