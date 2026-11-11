@@ -428,6 +428,23 @@ export function __resetVerdictObjectionsForTests(): void {
   verdictObjections.clear();
 }
 
+// Per-verdict evidence bundles: the canonical evidence behind each judged
+// request, served back over `GET /api/evidence/<id>` so anyone can re-check
+// the per-verdict link between a NEAR AI completion and the attested TEE
+// key. In-process memory only (same pattern as `verdictObjections`); lost
+// on restart, unjudged or refused ids answer 404.
+const evidenceBundles = new Map<number, EvidenceBundle>();
+
+export function getEvidenceBundle(requestId: number): EvidenceBundle | null {
+  const bundle = evidenceBundles.get(requestId);
+  return bundle === undefined ? null : { ...bundle };
+}
+
+// Test seam: drop the module-level evidence-bundle memory.
+export function __resetEvidenceBundlesForTests(): void {
+  evidenceBundles.clear();
+}
+
 export interface JudgeAndBindOptions {
   judgeInput: {
     request_id: number;
@@ -850,6 +867,7 @@ export function createVerifyHandler(
     const signatureBase58 = signVerdictPayload(payload, keys);
     try {
       await chain.submitVerdict(requestId, consistent, evidenceSha256, signatureBase58);
+      evidenceBundles.set(requestId, { ...evidenceBundle });
     } catch (error) {
       recordJudgeOutcome({
         verified: false,
@@ -926,7 +944,15 @@ export function createVerifyHandler(
         body: { error: "Request not found", request_id: requestId },
       };
     }
-    return { status: 200, body: { ...record } };
+    const bundle = evidenceBundles.get(requestId);
+    if (bundle === undefined) return { status: 200, body: { ...record } };
+    return {
+      status: 200,
+      body: {
+        ...record,
+        evidence_sha256: sha256HexText(canonicalEvidence(bundle)),
+      },
+    };
   };
   return handle;
 }

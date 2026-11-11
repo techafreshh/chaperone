@@ -1,7 +1,9 @@
 import bs58 from "bs58";
 import { createHash, randomBytes } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { sha256HexText } from "./bind.js";
 import { startFixtureCloud, type StartedFixtureCloud } from "./fixture-cloud.js";
+import { canonicalEvidence } from "./judge.js";
 import {
   getLastVerified,
   getStatus,
@@ -12,12 +14,14 @@ import {
   createNearChainAdapter,
   createVerifyHandler,
   createVerifyStack,
+  getEvidenceBundle,
   getVerdictObjection,
   InMemoryChain,
   resolveNearRpcUrl,
   resolveVerifierKeys,
   signVerdictPayload,
   SUBMIT_VERDICT_GAS,
+  __resetEvidenceBundlesForTests,
   __resetVerdictObjectionsForTests,
   type ChainAdapter,
   type NearApiModuleShape,
@@ -47,6 +51,7 @@ beforeEach(() => {
   }
   resetLastVerified();
   __resetVerdictObjectionsForTests();
+  __resetEvidenceBundlesForTests();
 });
 
 afterEach(async () => {
@@ -740,5 +745,68 @@ describe("broken signer badge state", () => {
     expect(
       ((getStatus().details as { reason?: string }).reason ?? "").length,
     ).toBeGreaterThan(0);
+  });
+});
+
+describe("evidence-bundle store (issue #66)", () => {
+  it("stores the judged bundle keyed by request id", async () => {
+    expect(getEvidenceBundle(5)).toBeNull();
+    const stack = track(createVerifyStack());
+    const result = await stack.handle({ request_id: 5 });
+    expect(result.status).toBe(200);
+    const bundle = getEvidenceBundle(5);
+    expect(bundle).not.toBeNull();
+    expect(bundle).toMatchObject({ fixture: true, filtered: false });
+    expect(Object.keys(bundle as object).sort()).toEqual([
+      "chat_id",
+      "filtered",
+      "fixture",
+      "model",
+      "preflight_nonce",
+      "request_sha256",
+      "response_sha256",
+      "signature",
+      "signing_address",
+    ]);
+    // The stored bundle's canonical sha256 is the committed evidence hash.
+    expect(sha256HexText(canonicalEvidence(bundle!))).toBe(
+      result.body.evidence_sha256,
+    );
+  });
+
+  it("returns null for unjudged and unknown ids", async () => {
+    const stack = track(createVerifyStack());
+    expect(getEvidenceBundle(5)).toBeNull();
+    expect(getEvidenceBundle(99)).toBeNull();
+    expect((await stack.handle({ request_id: 5 })).status).toBe(200);
+    expect(getEvidenceBundle(6)).toBeNull();
+    expect(getEvidenceBundle(99)).toBeNull();
+  });
+
+  it("stores nothing on bind-refusal tamper vectors", async () => {
+    const bad = track(createVerifyStack());
+    expect((await bad.handle({ request_id: 5, tamper: "bad-signature" })).status).toBe(502);
+    expect(getEvidenceBundle(5)).toBeNull();
+    const wrong = track(createVerifyStack());
+    expect((await wrong.handle({ request_id: 5, tamper: "wrong-signer" })).status).toBe(502);
+    expect(getEvidenceBundle(5)).toBeNull();
+  });
+
+  it("clears the map through the reset seam", async () => {
+    const stack = track(createVerifyStack());
+    expect((await stack.handle({ request_id: 5 })).status).toBe(200);
+    expect(getEvidenceBundle(5)).not.toBeNull();
+    __resetEvidenceBundlesForTests();
+    expect(getEvidenceBundle(5)).toBeNull();
+  });
+
+  it("carries evidence_sha256 in view only after judging", async () => {
+    const stack = track(createVerifyStack());
+    expect((await stack.handle.view(5)).body).not.toHaveProperty("evidence_sha256");
+    const judged = await stack.handle({ request_id: 5 });
+    expect(judged.status).toBe(200);
+    const after = await stack.handle.view(5);
+    expect(after.status).toBe(200);
+    expect(after.body.evidence_sha256).toBe(judged.body.evidence_sha256);
   });
 });

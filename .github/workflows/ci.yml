@@ -55,6 +55,7 @@ jobs:
           node scripts/fund-testnet.mjs --help
           bash scripts/fund-testnet.sh --help
           node scripts/sandbox-verify.mjs --help
+          node scripts/verify-evidence.mjs --help
           node scripts/attack-suite.mjs --help
           bash scripts/attack-suite.sh --help
       - name: Run offline script tests

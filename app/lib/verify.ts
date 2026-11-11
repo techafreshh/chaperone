@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import {
   createNearChainAdapter,
   createVerifyStack,
+  getEvidenceBundle,
   type VerifyStack,
 } from "../../verifier/src/server";
 
@@ -59,6 +60,29 @@ export async function handleVerifyPost(
     tamper: body.tamper ?? queryTamper,
   });
   return NextResponse.json(result.body, { status: result.status });
+}
+
+// Evidence-bundle read path: serves the canonical evidence bundle the
+// verifier stored when it judged `id`, so anyone can re-check the
+// per-verdict link. Non-positive-integer ids are 400; unjudged, refused,
+// or unknown ids are 404.
+export async function handleEvidenceGet(
+  id: unknown,
+): Promise<NextResponse> {
+  if (typeof id !== "number" || !Number.isInteger(id) || id <= 0) {
+    return NextResponse.json(
+      { error: "request_id must be a positive integer" },
+      { status: 400 },
+    );
+  }
+  const bundle = getEvidenceBundle(id);
+  if (bundle === null) {
+    return NextResponse.json(
+      { error: "evidence not found", request_id: id },
+      { status: 404 },
+    );
+  }
+  return NextResponse.json(bundle, { status: 200 });
 }
 
 export async function handleVerifyGet(
