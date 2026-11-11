@@ -89,7 +89,25 @@ scripts/attack-suite.sh --help      # --skip-app | --skip-build | --skip-chain |
 scripts/fund-testnet.sh --help      # top up agents below threshold (--live only; prints plan and exits 0 without creds)
 node scripts/verifier-live-smoke.mjs --help   # live preflight + judged smoke; SKIP with exit 0 when NEAR_AI_API_KEY is unset
 node scripts/sandbox-verify.mjs --help        # offline near-workspaces round trip
+node scripts/verify-evidence.mjs --help      # re-check one verdict's TEE evidence (no credentials needed)
 ```
+
+### Check a verdict yourself
+
+Every judged request links its evidence from `/requests`, and the bundle is served at `GET /api/evidence/<request_id>` (404 when there is none). Re-check one verdict with no credentials:
+
+```sh
+node scripts/verify-evidence.mjs <request_id> [--base-url URL]
+```
+
+The script prints `PASS` or `FAIL` per step and exits non-zero on any `FAIL`:
+
+- `fetch` — the verifier actually serves an evidence bundle for the id.
+- `hash` — the sha256 of the served bundle (canonical JSON, sorted keys, no whitespace) equals the `evidence_sha256` recorded on-chain, so the verdict cannot point at different evidence.
+- `signer` — the EIP-191 ECDSA signer recovered from the bundle's NEAR AI signature over `<model>:<sha256(request)>:<sha256(response)>` equals the attested `signing_address`, binding this completion to that TEE instance.
+- `attestation` — `fixture` for fixture bundles (informational, never `PASS`); `PASS` only for live-issued, signature-bound bundles.
+
+What is still trusted: the verifier service is trusted to sign only what NEAR AI returned. Re-checking the attestation report itself (DCAP quote, NVIDIA payload) stays server-side; this makes the per-verdict link checkable by anyone.
 
 ## Configuration
 
