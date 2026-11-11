@@ -1,12 +1,13 @@
 import { NextResponse } from "next/server";
 import bs58 from "bs58";
-import { requireOwner } from "./auth";
+import { isLiveTier, liveWriteBlocked } from "./guard";
 import type { Env } from "./env";
 
-// Verifier-key rotation store (issue #17). The operator-visible key is an
-// in-process overlay (plus the chain `get_verifier` view when live creds
-// exist) so the next `GET /settings` in the same server process reflects a
-// rotation. Only rotation writes are owner-gated; reads stay public.
+// Verifier-key rotation store. The operator-visible key is a fixture-tier
+// in-process overlay (plus the chain `get_verifier` view when a contract
+// id is set) so the next `GET /settings` in the same server process
+// reflects a rotation. Reads stay public; live writes are wallet-signed
+// in the browser (issue #62).
 
 // Overlay holds the operator's latest rotation (`null` = cleared, mirrors
 // the contract `set_verifier(None)`); `undefined` = no rotation yet.
@@ -126,18 +127,19 @@ async function readKeyFields(request: Request): Promise<Record<string, string>> 
   return merged;
 }
 
-// Owner-gated verifier-key rotation: missing/unknown session fails closed
-// with the exact 401. Accepts `verifier_key`/`verifierKey`/`key`; an empty
-// value clears the key to null (mirrors `set_verifier(None)`); non-empty
-// values must base58-decode to exactly 32 bytes per
-// `contract/src/verifier.rs` (`decode_verifier_key`), else 400.
+// Fixture-tier verifier-key rotation (no server sessions). On the live
+// tier the server sends nothing: the operator signs `set_verifier` with
+// the owner wallet in the browser. Accepts
+// `verifier_key`/`verifierKey`/`key`; an empty value clears the key to
+// null (mirrors `set_verifier(None)`); non-empty values must
+// base58-decode to exactly 32 bytes per `contract/src/verifier.rs`
+// (`decode_verifier_key`), else 400.
 export async function handleVerifierKeyPost(
   request: Request,
   deps: { env?: Env } = {},
 ): Promise<NextResponse> {
   const env = deps.env ?? process.env;
-  const auth = requireOwner(request, { env });
-  if (auth instanceof NextResponse) return auth;
+  if (isLiveTier(env)) return liveWriteBlocked();
   const fields = await readKeyFields(request);
   const raw =
     fields.verifier_key ?? fields.verifierKey ?? fields.key;

@@ -12,17 +12,22 @@ import {
 // (ids 1-6, so the probe's request 5 exists); a second verification of the
 // same request observes the paid/held transition via 409.
 //
-// Adapter selection is env-driven: `GUARD_CONTRACT_ID` plus signer env
-// selects the live `near-api-js` adapter, otherwise the fixture store
+// Adapter selection is env-driven: `GUARD_CONTRACT_ID` plus the dedicated
+// `VERIFIER_ACCOUNT_ID`/`VERIFIER_PRIVATE_KEY` pair selects the live
+// `near-api-js` adapter (never the owner key), otherwise the fixture store
 // serves. Model ids come from `NEAR_AI_MODEL`, never hardcoded.
 
 let stack: VerifyStack | null = null;
 
 function getStack(): VerifyStack {
   if (stack !== null) return stack;
-  const contractId = process.env.GUARD_CONTRACT_ID ?? "";
-  const accountId = process.env.NEAR_ACCOUNT_ID ?? "";
-  const privateKey = process.env.NEAR_PRIVATE_KEY ?? "";
+  const contractId =
+    (process.env.GUARD_CONTRACT_ID ?? process.env.NEAR_CONTRACT_ID ?? "").trim();
+  // Live `/verify` writes are submitted with a dedicated verifier key,
+  // never the owner key: the contract's `submit_verdict` is
+  // permissionless-but-signature-gated, so no owner signature is needed.
+  const accountId = (process.env.VERIFIER_ACCOUNT_ID ?? "").trim();
+  const privateKey = (process.env.VERIFIER_PRIVATE_KEY ?? "").trim();
   if (contractId !== "" && accountId !== "" && privateKey !== "") {
     stack = createVerifyStack({
       chain: createNearChainAdapter({ contractId, accountId, privateKey }),
