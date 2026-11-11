@@ -218,7 +218,7 @@ Events (`chaperone/1.0.0`): `agent_registered · policy_updated · payees_update
 ## 9. Security & Configuration
 
 **Authentication / authorization**
-- Operator UI: NEAR wallet login; admin methods gated by contract `owner` (predecessor must equal fleet owner).
+- Operator UI: no server sessions and no account-id login — wallet connection state lives in the browser. Owner methods (`approve_hold`, `reject_hold`, `set_agent_active`, `set_verifier`, `register_agent`, `set_agent_policy`) are signed by the operator's NEAR wallet (MyNearWallet / Meteor via wallet-selector); the contract `owner` check (predecessor must equal fleet owner) is the only authorization. The app server holds no owner key: with `GUARD_CONTRACT_ID` set its owner-write routes answer `403 {"error":"sign with the owner wallet"}` and send nothing; without it they act on a labeled in-memory fixture.
 - Agents: locked sub-accounts; **only** a function-call key restricted to the guard contract's methods — no transfer capability, no key management, by NEAR protocol design.
 - Verifier: Ed25519 key registered on-chain by owner; verdict signatures verified in-contract; submission is permissionless but signature-gated.
 
