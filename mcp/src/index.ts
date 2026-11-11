@@ -37,6 +37,7 @@ server.registerTool(
       amount_near: z.string().describe("Decimal NEAR amount, e.g. \"400\" or \"0.5\""),
       purpose_ref: z.string().describe("Purpose ref id, e.g. invoice-114"),
       vendor: z.string().describe("Vendor name"),
+      memo: z.string().describe("Agent's stated reason for the payment (1..=280 bytes)"),
       agent_id: z.string().optional().describe("Agent id, defaults to agent-1"),
     },
   },
