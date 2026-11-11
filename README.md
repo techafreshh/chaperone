@@ -155,4 +155,42 @@ The money path is one way: agent sub-accounts hold only function-call keys scope
 
 CI (`.github/workflows/ci.yml`) runs five jobs: `contract` (`cargo test -p chaperone-guard`), `app` (install + vitest + build), `scripts` (import checks + `node --test scripts/**/*.test.mjs` + offline sandbox verify), `verifier` (test + `tsc`), `mcp` (test + `tsc` + build). Reproduce the offline core locally with `scripts/deploy-testnet.sh --dry-run` (exit 0, no mutation) and `scripts/attack-suite.sh --skip-chain`.
 
+## Trust model
+
+**What the contract enforces on its own.** The guard holds the fleet treasury; money moves only via `request_payment` → deterministic checks → signed verdict → human release. Agent allowlist, per-payment cap, daily allowance, and purpose-ref (payee, vendor, remaining) checks live in `contract/src/request.rs`, `contract/src/policy.rs`, and `contract/src/books.rs`; the Ed25519 verdict-signature gate lives in `contract/src/verifier.rs`. Owner-only writables are enforced by the contract's owner check, not by the app server.
+
+**What the verifier attests, and how to check it.** Per-request preflight with a fresh nonce (`verifier/src/preflight.ts`), EIP-191 signer recovery matched against the attested `signing_address` (`verifier/src/bind.ts`), and the `evidence_sha256` binding between verdict and evidence bundle (`verifier/src/judge.ts`). Anyone can re-check a judged verdict with no credentials via `node scripts/verify-evidence.mjs <request_id>` (see `scripts/verify-evidence.mjs`); it prints `PASS`/`FAIL` per step (`fetch`, `hash`, `signer`, `attestation`).
+
+**What you still have to trust.** The verifier service is trusted to sign only what NEAR AI returned — re-checking proves the per-verdict link, not the hardware attestation report itself. The verifier is a single server, and the RPC endpoint, the Supabase mirror, and the wallet endpoint are trusted to report chain state honestly.
+
+## Live deployment
+
+<!-- deployment:start -->
+Not deployed yet.
+<!-- deployment:end -->
+
+## Built at NEAR HACKATHON
+
+Every commit in this repository dates from Nov 3, 2026 onward — inside the hackathon window (Oct 19 to Nov 14, 2026) — with no pre-hackathon baseline. Verify with:
+
+```sh
+git log --format=%ad --date=short
+```
+
+## Libraries and AI tools
+
+Runtime libraries (from the package manifests and `Cargo.toml`): the repo root uses `bs58` and `near-api-js`; the app is Next.js 15 + React 19 with `@near-wallet-selector/*`, `ethers`, `@phala/dcap-qvl`, and Tailwind CSS; the verifier uses `bs58`, `ethers`, and `@phala/dcap-qvl`; the MCP server uses `@modelcontextprotocol/sdk` and `zod`; the contract uses `near-sdk` 5 and `bs58` (dev: `ed25519-dalek`).
+
+This code was written by AI coding agents in an unattended build loop (pi-dark-factory): every change merged through CI, black-box runtime checks, and an AI review.
+
+## Other project by the same lead
+
+RAINCHECK — rainfall cover that pays out by itself: https://github.com/techafreshh/raincheck. An independent project that shares no code with this one.
+
+## What this does not do yet
+
+- Testnet only — no mainnet deployment.
+- The verifier service is a single server, not a replicated fleet.
+- Agent key revocation is an operator CLI (`scripts/revoke-key.sh`); the UI kill switch is the on-chain freeze.
+
 MIT — see [`LICENSE`](./LICENSE).

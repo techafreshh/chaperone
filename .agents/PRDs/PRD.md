@@ -3,19 +3,19 @@ type: prd
 project: chaperone
 status: draft
 created: 2026-11-03
-source: near-chaperone-brief.md + brainstorm session Nov 3 + verified NEAR AI/Tidepool recon
+source: "original brief: in git history" + brainstorm session Nov 3 + verified NEAR AI/Tidepool recon
 ---
 
 # PRD — CHAPERONE
 
 *Purpose verification for fleets of money-handling agents on NEAR.*
 
-**Competition context:** NEAR Hackathon, repo public before 2026-11-14T23:59Z, single uneditable submission, AI-screened then human-judged. Tracks: `security` (primary), `agents`, tag `privacy`. Ships standalone **only if** a human co-lead owns the submission (Techa's email is capped at 2 submissions, taken by SERVITOR + FOREMAN) — decision gate Nov 7/9. Otherwise CHAPERONE folds in as SERVITOR/FOREMAN's policy layer. This PRD assumes the standalone track (per owner decision Nov 3: "just build"), with the fold-in path preserved: everything through Phase 3 is reusable as the embedded policy layer.
+**Competition context:** NEAR Hackathon, repo public before 2026-11-14T23:59Z, single uneditable submission, AI-screened then human-judged. Tracks: `security` (primary), `agents`, tag `privacy`. The repo owner leads this submission as a standalone entry; the second submission by the same lead is RAINCHECK.
 
 **Build rules (binding on every agent, and on any plan/implement/review prompt or doc derived from this file):**
-- **Q-015 (hard rule):** no agent may ever read `near-chaperone-brief.md`. This PRD is the **sole** requirement source. The Books component and all sample data must stay independent of SERVITOR/FOREMAN — no sibling-repo code, briefs, or docs, ever.
+- **Q-015 (hard rule):** no agent may ever read `near-chaperone-brief.md`. This PRD is the **sole** requirement source. The Books component and all sample data must stay independent of RAINCHECK — no sibling-repo code, briefs, or docs, ever.
 - Lap 1 is a **walking skeleton**: the contract crate compiling with its first green unit tests, a minimal Next.js 15 app shell serving `/api/health`, and a CI workflow (`.github/workflows/ci.yml`) that runs `cargo test` for the contract and builds the app. The factory merge gate autodetects checks (`required_checks: ["*"]`). **`/api/health` contract: HTTP 200, body exactly the JSON `{"ok":true}`** — this shape is pinned because the verifier scenario asserts it.
-- Demo video, Verification-Center footage, co-lead coordination, and the final submission (§12 Phase 4) are **operator-run** — they must not become agent build issues.
+- Demo video, Verification-Center footage, and the final submission (§12 Phase 4) are **operator-run** — they must not become agent build issues.
 - **Fixture-first mechanics (operator decision 2026-11-03):** credential-dependent issues (#10, #11, #12, #21) merge on labeled fixture/sandbox tiers — the verifier and mirror expose explicit `fixture`/`disabled` states, the UI never renders `TEE-verified` from fixture data. Live verification against real credentials is an operator run-script step once `factoryd.env` carries the keys.
 
 ---
@@ -26,7 +26,7 @@ Everyone is giving AI agents spending limits. Limits did not stop the scam that 
 
 CHAPERONE is **mission control for a fleet of money-handling agents**. Where day-one "spend guards" lock one wallet behind amount caps, CHAPERONE governs a workforce: each agent is a NEAR sub-account whose only key is a function-call key restricted to the **guard contract** — it literally cannot move money any other way. Every payment request must carry a **purpose** (vendor, amount, reference to a real invoice or order). Deterministic checks run first (daily allowance, per-payment cap, payee allowlist, purpose-ref exists and covers the amount). Then a **TEE-hosted model on NEAR AI Cloud** judges request-versus-reason consistency; its verdict is signed, its attestation is server-verified, and the UI shows a binary-honest "TEE-verified" chip. Mismatches hold the money for a human. Everything — requests, verdicts, holds, kills, payments — emits on-chain events: the audit log *is* the chain.
 
-**MVP goal:** a standalone hackathon submission by Nov 13 that demonstrably blocks three scripted fraud attacks on-chain (over-allowance, non-allowlisted payee, purpose-mismatch), lets one clean payment transit with the full attestation chain visible, manages ≥4 independent agents, and replays its attack suite one-command from a fresh clone.
+**MVP goal:** a standalone hackathon submission by 2026-11-14T23:59Z that demonstrably blocks three scripted fraud attacks on-chain (over-allowance, non-allowlisted payee, purpose-mismatch), lets one clean payment transit with the full attestation chain visible, manages ≥4 independent agents, and replays its attack suite one-command from a fresh clone.
 
 ## 2. Mission
 
@@ -55,7 +55,7 @@ CHAPERONE is **mission control for a fleet of money-handling agents**. Where day
 **Core functionality**
 - [ ] Guard contract (Rust, near-sdk 5): fleet treasury (deposit/withdraw), agent registry with per-agent policy (daily allowance, per-payment cap, payee allowlist, active flag), `request_payment`, signed-verdict intake, hold → human approve/reject, kill-switch, event emission for every state change
 - [ ] Deterministic checks (in-contract): agent active, per-payment cap, daily allowance (UTC-day), payee allowlisted, purpose-ref exists/open, amount ≤ purpose-ref cap
-- [ ] Books: independent, tiny in-app ledger of invoices/orders (id, vendor, cap) mirrored on-chain via `register_purpose_ref` — *fully independent data model, no SERVITOR code or briefs read (Q-015)*
+- [ ] Books: independent, tiny in-app ledger of invoices/orders (id, vendor, cap) mirrored on-chain via `register_purpose_ref` — *fully independent data model, no RAINCHECK code or briefs read (Q-015)*
 - [ ] Purpose verifier service: NEAR AI Cloud TEE-hosted model judges request-vs-reason; verdict Ed25519-signed; contract verifies signature before any payment
 - [ ] Attestation pipeline: preflight attestation report with random nonce → server-side verification (DCAP quote, RTMR3 event-log replay, MRCONFIGID via app_compose, NVIDIA GPU payload via NRAS) → store verified `signing_address` → response signature recovery per completion → match → badge
 - [ ] Operator web app: fleet dashboard (agents, allowances, remaining-today), live request feed with purpose chips + attestation badge, approval queue (holds), kill-switch button, receipts waterfall, exportable audit pack (JSON + CSV of on-chain events), wallet login
@@ -287,7 +287,7 @@ POST /attestation/preflight { model }           → { signing_address, verified:
 
 ## 11. Success Criteria
 
-**MVP success = the submission ships Nov 13 under a co-lead's name with every eval gate green** (or, if folded, ships *inside* SERVITOR + FOREMAN with policy credit — gates 1–2 then run against their integration).
+**MVP success = the submission ships under the repo owner's name by 2026-11-14T23:59Z with every eval gate green**.
 
 **Functional requirements**
 - [ ] 3 scripted attacks blocked **on-chain**, reasons recorded as events (attack gate)
@@ -331,16 +331,16 @@ POST /attestation/preflight { model }           → { signing_address, verified:
 - [ ] Kill-switch on-chain + key-revoke demo; fleet unaffected proof
 - [ ] MCP server w/ 4 tools against guard
 - Validation: `scripts/attack-suite.sh` all-green from clean clone; MCP refusal shows raw on-chain reason
-- **Nov 7: co-lead confirmation checkpoint · Nov 9: go/no-go** (fold path: policy layer + README credits, stop standalone spend)
+- **Nov 9: go/no-go** — `scripts/attack-suite.sh` all-green from a clean clone, or cut scope to the eval gates
 
-**Phase 4 — Polish, footage, submit (Nov 9–13)**
+**Phase 4 — Polish, footage, submit (Nov 9–14)**
 - Goal: judged-on merits.
 - [ ] Demo video (60–75s per brief beats); Verification Center footage
 - [ ] README (machine-pass checklist) + attack-suite docs; mainnet dust clip
-- [ ] Freeze repo pre-submit; submit under co-lead identity (Techa listed as team member)
+- [ ] Freeze repo pre-submit; submit under the repo owner's identity
 - Validation: repro gate from a third-party clone; all gates green in video
 
-**Operator-run — keep off the agent backlog:** demo video · Verification-Center footage · co-lead coordination · final submission · repo freeze.
+**Operator-run — keep off the agent backlog:** demo video · Verification-Center footage · final submission · repo freeze.
 
 ## 13. Future Considerations (post-MVP)
 
@@ -356,13 +356,12 @@ POST /attestation/preflight { model }           → { signing_address, verified:
 1. **TEE/attestation churn or partial chain (documented gap, recon-confirmed).** *Mitigation:* binary-honest badge; deterministic path always exists; per-request signer match + nonce; Verification Center footage as independent proof.
 2. **Contract feature creep.** *Mitigation:* hard rule — guard does hold/check/pay (+owner withdraw as refund path); every candidate feature must trace to an attack-suite line or it's out.
 3. **Transfer-failure async gap (prototype cut-corner): payment promises are fire-and-forget in the skeleton.** *Mitigation:* fund check before transfer + underfunded requests stay held; Phase 3 stretch: promise-callback reconciliation emitting `request_failed` + allowance rollback.
-4. **No co-lead by Nov 7/9.** *Mitigation:* fold is a first-class success path: architecture is component-shaped (contract + verifier + MCP standalone), so SERVITOR/FOREMAN integration is days, not a rewrite; README credit + security-tag contribution on both.
-5. **Two-submission cap math forces under-polish.** *Mitigation:* eval gates before polish; polish order: money-shot → fleet kill → audit pack; demos scripted to script beats, not freeform.
+4. **Single-lead bandwidth forces under-polish.** *Mitigation:* eval gates before polish; polish order: money-shot → fleet kill → audit pack; demos scripted to script beats, not freeform.
 
 ## 15. Appendix
 
 **Related documents**
-- `near-chaperone-brief.md` (repo root) — source brief; submission contract mirrors SERVITOR's §6 (not read here, per Q-015)
+- original brief: in git history — superseded input (not read here, per Q-015)
 
 **Verified references (recon, Nov 3)**
 - NEAR AI Cloud quickstart/private-inference/verification docs: `https://docs.near.ai/cloud/*`
@@ -374,7 +373,6 @@ POST /attestation/preflight { model }           → { signing_address, verified:
 **Repo structure**
 ```
 chaperone/
-├── near-chaperone-brief.md   # original brief (unchanged input)
 ├── .agents/PRDs/PRD.md       # this document
 ├── contract/                 # Phase 1
 ├── app/                      # Phase 2
