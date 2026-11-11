@@ -10,6 +10,9 @@
     "books:seed": "node ../scripts/seed-books.mjs"
   },
   "dependencies": {
+    "@near-wallet-selector/core": "10.1.4",
+    "@near-wallet-selector/meteor-wallet": "10.1.4",
+    "@near-wallet-selector/my-near-wallet": "10.1.4",
     "@phala/dcap-qvl": "0.7.1",
     "bs58": "^6.0.0",
     "ethers": "^6.17.0",
@@ -19,9 +22,12 @@
     "react-dom": "19.3.1"
   },
   "devDependencies": {
+    "@testing-library/react": "^16.3.3",
+    "@testing-library/user-event": "^14.6.9",
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "jsdom": "^31.0.0",
     "typescript": "^5.0.0",
     "vitest": "^3.0.0"
   }
