@@ -59,6 +59,42 @@ export function formatGateLine(def, result) {
 // `callFunctionRaw`/`signAndSendTransaction` resolve to a
 // FinalExecutionOutcome (`transaction_outcome.id`); older shapes surface
 // `transaction.hash` or a bare `hash`.
+// Poll an injected `getRequest`-style view until the request reaches
+// one of the wanted statuses, then return the record. Async transfers
+// settle in a later receipt than the verdict transaction, so gates must
+// poll instead of reading once. `sleep` is injectable so the offline
+// `node:test` suite never waits on a real timer.
+export async function waitForRequestStatus(
+  viewRequest,
+  requestId,
+  wantStatuses,
+  {
+    tries = 30,
+    delayMs = 2000,
+    sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  } = {},
+) {
+  let last = null;
+  for (let attempt = 0; attempt < tries; attempt += 1) {
+    last = await viewRequest(requestId);
+    if (
+      last !== null &&
+      last !== undefined &&
+      wantStatuses.includes(last.status)
+    ) {
+      return last;
+    }
+    if (attempt + 1 < tries) {
+      await sleep(delayMs);
+    }
+  }
+  const seen =
+    last !== null && last !== undefined ? last.status : undefined;
+  throw new Error(
+    `Timed out waiting for request ${requestId} to reach ${wantStatuses.join("/")} (last saw ${seen}).`,
+  );
+}
+
 export function txHashOf(outcome) {
   const hash =
     outcome?.transaction_outcome?.id ?? outcome?.transaction?.hash ?? outcome?.hash;

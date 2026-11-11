@@ -32,6 +32,7 @@ import {
   formatGateLine,
   resolveGuardId,
   txHashOf,
+  waitForRequestStatus,
 } from "./lib/attack-gates.mjs";
 import { resolveSuiteKey, signWithSuiteKey } from "./fixtures.mjs";
 
@@ -124,6 +125,38 @@ async function getRequest(provider, contractId, requestId) {
     throw new Error(`get_request(${requestId}) returned null.`);
   }
   return record;
+}
+
+// Native balance of an existing account, as yoctoNEAR bigint. Throws a
+// labeled gate-setup error when the account does not exist — a real
+// transfer needs a real payee.
+async function viewAccountBalance(provider, accountId) {
+  let res;
+  try {
+    res = await provider.query({
+      request_type: "view_account",
+      account_id: accountId,
+      finality: "final",
+    });
+  } catch (err) {
+    throw new Error(
+      `Gate clean-transit failed: payee ${accountId} does not exist ` +
+        `(pass --good-payee with an existing account): ${err?.message ?? err}.`,
+    );
+  }
+  return BigInt(res.amount);
+}
+
+// Logical treasury balance (`treasury()` view), normalized from the
+// contract's U128 string shape to bigint.
+async function viewTreasury(provider, contractId) {
+  const raw = await viewFunction(provider, contractId, "treasury", {});
+  const text =
+    typeof raw === "string" ? raw : (raw?.U128 ?? raw?.u128 ?? String(raw));
+  if (!/^\d+$/.test(text)) {
+    throw new Error(`Gate clean-transit failed: bad treasury shape ${JSON.stringify(raw)}.`);
+  }
+  return BigInt(text);
 }
 
 function assertRequestId(value) {
@@ -483,9 +516,15 @@ async function main() {
     }
 
     // Gate 4: clean transit stages, then the fixture verdict
-    // (consistent=true) pays it.
+    // (consistent=true) pays it for real. The transfer settles in a
+    // later receipt than the verdict transaction, so the gate polls to
+    // `paid` and then asserts the money moved: the payee gains exactly
+    // the requested amount and the treasury falls by the same.
     {
       const def = GATE_DEFS[3];
+      const expectedDelta = BigInt(nearToYoctoString(SUITE_DEFAULTS.stagedNear, "staged amount"));
+      const payeeBefore = await viewAccountBalance(provider, goodPayee);
+      const treasuryBefore = await viewTreasury(provider, guardId);
       const { tx, result } = await requestAsAgent(
         goodPayee,
         SUITE_DEFAULTS.stagedNear,
@@ -493,16 +532,34 @@ async function main() {
       );
       const requestId = assertRequestId(result?.request_id);
       const { verdictTx, signatureBase58 } = await submitFixtureVerdict(requestId, true);
-      const storedReq = await getRequest(provider, guardId, requestId);
+      const storedReq = await waitForRequestStatus(
+        (id) => getRequest(provider, guardId, id),
+        requestId,
+        ["paid"],
+      );
       if (storedReq.status !== "paid") {
         throw new Error(`Gate clean-transit failed: request ${requestId} is ${storedReq.status}.`);
+      }
+      const payeeAfter = await viewAccountBalance(provider, goodPayee);
+      const treasuryAfter = await viewTreasury(provider, guardId);
+      const payeeDelta = payeeAfter - payeeBefore;
+      const treasuryDelta = treasuryBefore - treasuryAfter;
+      if (payeeDelta !== expectedDelta) {
+        throw new Error(
+          `Gate clean-transit failed: payee balance moved by ${payeeDelta} yocto, expected ${expectedDelta}.`,
+        );
+      }
+      if (treasuryDelta !== expectedDelta) {
+        throw new Error(
+          `Gate clean-transit failed: treasury moved by ${treasuryDelta} yocto, expected ${expectedDelta}.`,
+        );
       }
       console.log(
         formatGateLine(def, {
           requestId,
           tx,
           verdictTx,
-          extra: attestationExtra(signatureBase58),
+          extra: `${attestationExtra(signatureBase58)} balance_delta=${payeeDelta}`,
         }),
       );
     }

@@ -221,6 +221,42 @@ describe("deriveAudits", () => {
     });
   });
 
+  it("maps paying to created + consistent verdict with no outcome yet", () => {
+    const audits = deriveAudits({ ...base, status: "paying", reason: null });
+    assert.deepEqual(
+      audits.map((a) => a.event),
+      ["request_created", "verdict_recorded"],
+    );
+    assert.equal(
+      audits.find((a) => a.event === "verdict_recorded").data.consistent,
+      true,
+    );
+    assert.deepEqual(deriveVerdict({ ...base, status: "paying" }), {
+      request_id: 9,
+      consistent: true,
+    });
+  });
+
+  it("maps failed to created + consistent verdict + request_failed", () => {
+    const audits = deriveAudits({
+      ...base,
+      status: "failed",
+      reason: "TransferFailed",
+    });
+    assert.deepEqual(
+      audits.map((a) => a.event),
+      ["request_created", "verdict_recorded", "request_failed"],
+    );
+    assert.equal(
+      audits.find((a) => a.event === "request_failed").data.reason,
+      "TransferFailed",
+    );
+    assert.deepEqual(deriveVerdict({ ...base, status: "failed" }), {
+      request_id: 9,
+      consistent: true,
+    });
+  });
+
   it("derives no verdict row for staged or rejected requests", () => {
     assert.equal(deriveVerdict({ ...base, status: "staged" }), null);
     assert.equal(deriveVerdict({ ...base, status: "rejected" }), null);

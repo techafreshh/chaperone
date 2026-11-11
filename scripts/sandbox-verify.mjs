@@ -20,6 +20,7 @@ import {
   FC_METHOD_NAMES,
 } from "./lib/agent-keys.mjs";
 import { DEFAULT_WASM_PATH } from "./lib/deploy-plan.mjs";
+import { buildVerdictPayload, waitForRequestStatus } from "./lib/attack-gates.mjs";
 
 // Rejection reasons asserted per gate, mirroring
 // `REASON_*` in `contract/src/request.rs`. The mapping (not the strings)
@@ -65,8 +66,10 @@ export function sandboxUsage() {
     "",
     "Without the built WASM (or without near-workspaces/the sandbox binary)",
     "the script prints SKIP and exits 0. With them, it runs the full",
-    "deploy -> 4 agents -> 3 blocks + 1 staged transit -> kill-switch +",
-    "key-revoke round trip and exits non-zero on any mismatch.",
+    "deploy -> 4 agents -> 3 blocks + 1 staged transit -> real-NEAR payout",
+    "round trip (paid balances, underfunded hold + approve, failed-transfer",
+    "refund, reject spend release) -> kill-switch + key-revoke round trip",
+    "and exits non-zero on any mismatch.",
   ].join("\n");
 }
 
@@ -97,6 +100,39 @@ function assertOutcome(outcome, { status, reason }, gate) {
     );
   }
   console.log(`sandbox gate ${gate}: ${status}${reason ? `/${reason}` : ""} request_id=${outcome.request_id}`);
+}
+
+const YOCTO_PER_NEAR = 10n ** 24n;
+
+export function nearToYocto(near) {
+  return (BigInt(near) * YOCTO_PER_NEAR).toString();
+}
+
+// Normalize a U128 view value (decimal string or `{ U128 }` wrapper) to
+// bigint for exact balance math.
+export function u128ToBigInt(raw, what) {
+  const text =
+    typeof raw === "string" ? raw : (raw?.U128 ?? raw?.u128 ?? String(raw));
+  if (!/^\d+$/.test(text)) {
+    throw new Error(`Sandbox ${what} failed: bad U128 shape ${JSON.stringify(raw)}.`);
+  }
+  return BigInt(text);
+}
+
+async function viewTreasury(contract) {
+  return u128ToBigInt(await contract.view("treasury", {}), "treasury");
+}
+
+async function viewSpentToday(contract, agentId) {
+  const view = await contract.view("get_agent", { agent_id: agentId });
+  if (!view) {
+    throw new Error(`Sandbox spend read failed: ${agentId} is not registered.`);
+  }
+  return u128ToBigInt(view.spent_today_yocto, "spend");
+}
+
+async function viewNativeBalance(account) {
+  return BigInt((await account.balance()).available);
 }
 
 async function main() {
@@ -237,6 +273,228 @@ async function main() {
     const stored = await contract.view("get_request", { request_id: staged.request_id });
     if (stored?.status !== "staged") {
       throw new Error(`Sandbox clean-transit failed: get_request(${staged.request_id}) is ${stored?.status}.`);
+    }
+
+    // Payout round trip (issue #60): consistent verdicts and hold
+    // approvals move real NEAR. The transfer settles in a later receipt
+    // than the verdict transaction, so every paid assertion polls to the
+    // terminal state first. `paid` can only be written by the private
+    // `on_payout` callback in the same execution that emits
+    // `request_paid`, so reaching `paid` proves the receipt log too.
+    const { resolveSuiteKey, signWithSuiteKey } = await import("./fixtures.mjs");
+    const suiteKey = resolveSuiteKey(repoRoot());
+    await root.call(contract, "set_verifier", {
+      public_key_base58: suiteKey.publicKeyBase58,
+    });
+    console.log("sandbox payout: verifier key registered");
+
+    // Fund the logical treasury: 10 NEAR covers every payout below.
+    await root.call(
+      contract,
+      "deposit_fleet_funds",
+      {},
+      { attachedDeposit: 10n * YOCTO_PER_NEAR },
+    );
+    if ((await viewTreasury(contract)) !== 10n * YOCTO_PER_NEAR) {
+      throw new Error("Sandbox payout setup failed: treasury is not 10 NEAR.");
+    }
+
+    // A payee that really exists: the transfer must land somewhere.
+    const payee = await root.createSubAccount("payee");
+    await root.call(contract, "add_payees", {
+      agent_id: agents[1].accountId,
+      payees: [payee.accountId],
+    });
+
+    async function submitPayoutVerdict(requestId, consistent) {
+      const record = await contract.view("get_request", { request_id: requestId });
+      if (record?.status !== "staged") {
+        throw new Error(
+          `Sandbox payout setup failed: request ${requestId} is ${record?.status}, expected staged.`,
+        );
+      }
+      const signatureBase58 = signWithSuiteKey(
+        buildVerdictPayload(record, consistent),
+        suiteKey,
+      );
+      await root.call(contract, "submit_verdict", {
+        request_id: requestId,
+        consistent,
+        signature_base58: signatureBase58,
+      });
+    }
+
+    async function waitSettled(requestId, want) {
+      return waitForRequestStatus(
+        (id) => contract.view("get_request", { request_id: id }),
+        requestId,
+        want,
+        { tries: 40, delayMs: 500 },
+      );
+    }
+
+    // Gate A: consistent verdict pays 2 NEAR for real.
+    {
+      const payeeBefore = await viewNativeBalance(payee);
+      const treasuryBefore = await viewTreasury(contract);
+      const outcome = await agents[1].call(contract, "request_payment", {
+        payee: payee.accountId,
+        amount_yocto: nearToYocto(2),
+        purpose_ref: PURPOSE_REF,
+        vendor: "CoreWeave",
+      });
+      assertOutcome(outcome, { status: "staged", reason: null }, "payout-request");
+      await submitPayoutVerdict(outcome.request_id, true);
+      const settled = await waitSettled(outcome.request_id, ["paid"]);
+      if (settled.status !== "paid") {
+        throw new Error(`Sandbox payout failed: request ${outcome.request_id} is ${settled.status}.`);
+      }
+      const payeeDelta = (await viewNativeBalance(payee)) - payeeBefore;
+      const treasuryDelta = treasuryBefore - (await viewTreasury(contract));
+      if (payeeDelta !== 2n * YOCTO_PER_NEAR) {
+        throw new Error(`Sandbox payout failed: payee gained ${payeeDelta} yocto, expected 2 NEAR.`);
+      }
+      if (treasuryDelta !== 2n * YOCTO_PER_NEAR) {
+        throw new Error(`Sandbox payout failed: treasury fell by ${treasuryDelta} yocto, expected 2 NEAR.`);
+      }
+      console.log(
+        `sandbox payout: paid request=${outcome.request_id} balance_delta=${payeeDelta} treasury_delta=${treasuryDelta}`,
+      );
+    }
+
+    // Gate B: 2 NEAR against a 1 NEAR treasury holds with
+    // InsufficientTreasury (no money moves); topping up to 6 NEAR and
+    // approving the hold then pays.
+    {
+      const treasuryAfterA = await viewTreasury(contract);
+      await root.call(contract, "withdraw_fleet_funds", {
+        to: root.accountId,
+        amount: (treasuryAfterA - YOCTO_PER_NEAR).toString(),
+      });
+      if ((await viewTreasury(contract)) !== YOCTO_PER_NEAR) {
+        throw new Error("Sandbox underfunded setup failed: treasury is not 1 NEAR.");
+      }
+      const payeeBefore = await viewNativeBalance(payee);
+      const outcome = await agents[1].call(contract, "request_payment", {
+        payee: payee.accountId,
+        amount_yocto: nearToYocto(2),
+        purpose_ref: PURPOSE_REF,
+        vendor: "CoreWeave",
+      });
+      assertOutcome(outcome, { status: "staged", reason: null }, "underfunded-request");
+      await submitPayoutVerdict(outcome.request_id, true);
+      const held = await contract.view("get_request", { request_id: outcome.request_id });
+      if (held?.status !== "held" || held?.reason !== "InsufficientTreasury") {
+        throw new Error(
+          `Sandbox underfunded failed: request ${outcome.request_id} is ${held?.status}/${held?.reason ?? null}.`,
+        );
+      }
+      if ((await viewNativeBalance(payee)) !== payeeBefore) {
+        throw new Error("Sandbox underfunded failed: payee balance moved without payment.");
+      }
+      if ((await viewTreasury(contract)) !== YOCTO_PER_NEAR) {
+        throw new Error("Sandbox underfunded failed: treasury moved without payment.");
+      }
+      console.log(
+        `sandbox payout-underfunded: held request=${outcome.request_id} reason=InsufficientTreasury`,
+      );
+
+      await root.call(
+        contract,
+        "deposit_fleet_funds",
+        {},
+        { attachedDeposit: 5n * YOCTO_PER_NEAR },
+      );
+      const treasuryBeforeApprove = await viewTreasury(contract);
+      await root.call(contract, "approve_hold", { request_id: outcome.request_id });
+      const settled = await waitSettled(outcome.request_id, ["paid"]);
+      if (settled.status !== "paid") {
+        throw new Error(`Sandbox approve failed: request ${outcome.request_id} is ${settled.status}.`);
+      }
+      const payeeDelta = (await viewNativeBalance(payee)) - payeeBefore;
+      const treasuryDelta = treasuryBeforeApprove - (await viewTreasury(contract));
+      if (payeeDelta !== 2n * YOCTO_PER_NEAR || treasuryDelta !== 2n * YOCTO_PER_NEAR) {
+        throw new Error(
+          `Sandbox approve failed: payee_delta=${payeeDelta} treasury_delta=${treasuryDelta}, expected 2 NEAR each.`,
+        );
+      }
+      console.log(
+        `sandbox payout-approve: paid request=${outcome.request_id} balance_delta=${payeeDelta} treasury_delta=${treasuryDelta}`,
+      );
+    }
+
+    // Gate C: a transfer to an account id that does not exist settles
+    // `failed` with reason TransferFailed; the treasury debit and the
+    // agent's spent-today are both restored.
+    {
+      const ghostPayee = `no-such-payee.${root.accountId}`;
+      await root.call(contract, "add_payees", {
+        agent_id: agents[1].accountId,
+        payees: [ghostPayee],
+      });
+      const treasuryBefore = await viewTreasury(contract);
+      const spentBefore = await viewSpentToday(contract, agents[1].accountId);
+      const outcome = await agents[1].call(contract, "request_payment", {
+        payee: ghostPayee,
+        amount_yocto: nearToYocto(1),
+        purpose_ref: PURPOSE_REF,
+        vendor: "CoreWeave",
+      });
+      assertOutcome(outcome, { status: "staged", reason: null }, "ghost-request");
+      await submitPayoutVerdict(outcome.request_id, true);
+      const settled = await waitSettled(outcome.request_id, ["paid", "failed"]);
+      if (settled.status !== "failed" || settled.reason !== "TransferFailed") {
+        throw new Error(
+          `Sandbox ghost-payee failed: request ${outcome.request_id} is ${settled.status}/${settled.reason ?? null}.`,
+        );
+      }
+      if ((await viewTreasury(contract)) !== treasuryBefore) {
+        throw new Error("Sandbox ghost-payee failed: treasury was not restored.");
+      }
+      if ((await viewSpentToday(contract, agents[1].accountId)) !== spentBefore) {
+        throw new Error("Sandbox ghost-payee failed: agent spent-today was not restored.");
+      }
+      console.log(
+        `sandbox payout-failed: request=${outcome.request_id} reason=TransferFailed treasury_restored spent_restored`,
+      );
+    }
+
+    // Gate D: rejecting a held request releases the amount from the
+    // agent's spent-today and never transfers.
+    {
+      const treasuryBefore = await viewTreasury(contract);
+      const spentBefore = await viewSpentToday(contract, agents[1].accountId);
+      const outcome = await agents[1].call(contract, "request_payment", {
+        payee: payee.accountId,
+        amount_yocto: nearToYocto(1),
+        purpose_ref: PURPOSE_REF,
+        vendor: "CoreWeave",
+      });
+      assertOutcome(outcome, { status: "staged", reason: null }, "reject-request");
+      await submitPayoutVerdict(outcome.request_id, false);
+      const held = await contract.view("get_request", { request_id: outcome.request_id });
+      if (held?.status !== "held") {
+        throw new Error(`Sandbox reject setup failed: request ${outcome.request_id} is ${held?.status}.`);
+      }
+      await root.call(contract, "reject_hold", { request_id: outcome.request_id });
+      const rejected = await contract.view("get_request", { request_id: outcome.request_id });
+      if (rejected?.status !== "rejected" || rejected?.reason !== "HoldRejected") {
+        throw new Error(
+          `Sandbox reject failed: request ${outcome.request_id} is ${rejected?.status}/${rejected?.reason ?? null}.`,
+        );
+      }
+      const spentAfter = await viewSpentToday(contract, agents[1].accountId);
+      if (spentAfter !== spentBefore) {
+        throw new Error(
+          `Sandbox reject failed: spent-today is ${spentAfter}, expected release back to ${spentBefore}.`,
+        );
+      }
+      if ((await viewTreasury(contract)) !== treasuryBefore) {
+        throw new Error("Sandbox reject failed: treasury moved without payment.");
+      }
+      console.log(
+        `sandbox payout-reject: request=${outcome.request_id} reason=HoldRejected spent_released`,
+      );
     }
 
     // Kill-switch: freeze agent-1 on-chain, then prove intake stops.

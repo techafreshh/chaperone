@@ -9,6 +9,7 @@ import {
   isAlreadyRegisteredMessage,
   resolveGuardId,
   txHashOf,
+  waitForRequestStatus,
 } from "./attack-gates.mjs";
 
 const ONE_NEAR = 1_000_000_000_000_000_000_000_000n;
@@ -136,6 +137,50 @@ describe("buildVerdictPayload", () => {
     assert.throws(
       () => buildVerdictPayload({ ...stableRequest(), amount_yocto: (1n << 128n).toString() }, true),
       /out of range/,
+    );
+  });
+});
+
+describe("waitForRequestStatus", () => {
+  it("returns the record once a wanted status appears", async () => {
+    const reads = [
+      { request_id: 9, status: "paying" },
+      { request_id: 9, status: "paying" },
+      { request_id: 9, status: "paid" },
+    ];
+    const sleeps = [];
+    const record = await waitForRequestStatus(
+      async () => reads.shift(),
+      9,
+      ["paid"],
+      { delayMs: 5, sleep: async (ms) => void sleeps.push(ms) },
+    );
+    assert.equal(record.status, "paid");
+    assert.equal(sleeps.length, 2);
+  });
+
+  it("accepts any of several terminal statuses without sleeping", async () => {
+    const sleeps = [];
+    const record = await waitForRequestStatus(
+      async () => ({ request_id: 9, status: "failed" }),
+      9,
+      ["paid", "failed"],
+      { sleep: async (ms) => void sleeps.push(ms) },
+    );
+    assert.equal(record.status, "failed");
+    assert.equal(sleeps.length, 0);
+  });
+
+  it("throws a labeled timeout naming the last status seen", async () => {
+    await assert.rejects(
+      () =>
+        waitForRequestStatus(
+          async () => ({ request_id: 9, status: "paying" }),
+          9,
+          ["paid"],
+          { tries: 3, sleep: async () => {} },
+        ),
+      /Timed out waiting for request 9.*last saw paying/,
     );
   });
 });

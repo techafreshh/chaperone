@@ -261,6 +261,31 @@ async function main() {
     `fixture policy: agent=${agentId} daily=${SUITE_DEFAULTS.dailyAllowanceNear}NEAR cap=${SUITE_DEFAULTS.perPaymentCapNear}NEAR`,
   );
 
+  // 3b. Top up the logical treasury so the clean-transit gate can pay:
+  // consistent verdicts hold (no transfer) when the treasury does not
+  // cover the amount. Bounded and idempotent: only tops up below a
+  // 15 NEAR floor, in a single 20 NEAR owner deposit.
+  const treasuryFloorYocto = BigInt(nearToYoctoString("15", "treasury floor"));
+  const treasuryTopUpYocto = BigInt(nearToYoctoString("20", "treasury top-up"));
+  const treasuryRaw = await viewFunction(provider, guardId, "treasury", {});
+  const treasuryText =
+    typeof treasuryRaw === "string"
+      ? treasuryRaw
+      : (treasuryRaw?.U128 ?? treasuryRaw?.u128 ?? String(treasuryRaw));
+  const treasuryYocto = /^\d+$/.test(treasuryText) ? BigInt(treasuryText) : 0n;
+  if (treasuryYocto < treasuryFloorYocto) {
+    await owner.callFunction({
+      contractId: guardId,
+      methodName: "deposit_fleet_funds",
+      args: {},
+      gas: CALL_GAS,
+      deposit: treasuryTopUpYocto,
+    });
+    console.log(`fixture treasury: topped up ${treasuryTopUpYocto} yocto`);
+  } else {
+    console.log(`fixture treasury: already funded (${treasuryYocto} yocto)`);
+  }
+
   // 4. Register the local suite verifier key (generate-or-reuse), then
   // assert the terminal view shows it.
   const suiteKey = resolveSuiteKey(repoRoot);

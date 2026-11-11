@@ -8,8 +8,10 @@ import {
   REJECT_REASONS,
   expectedRejectReason,
   isGuardScopedKeyShape,
+  nearToYocto,
   parseSandboxArgs,
   sandboxUsage,
+  u128ToBigInt,
 } from "./sandbox-verify.mjs";
 import { FC_ALLOWANCE_YOCTO, FC_METHOD_NAMES } from "./lib/agent-keys.mjs";
 
@@ -61,6 +63,27 @@ describe("expectedRejectReason", () => {
 
   it("rejects unknown gates", () => {
     assert.throws(() => expectedRejectReason("nope"), /Unknown sandbox gate/);
+  });
+});
+
+describe("nearToYocto", () => {
+  it("scales whole NEAR to exact yocto strings", () => {
+    assert.equal(nearToYocto(2), "2000000000000000000000000");
+    assert.equal(nearToYocto(0), "0");
+    assert.equal(nearToYocto(10), "10000000000000000000000000");
+  });
+});
+
+describe("u128ToBigInt", () => {
+  it("reads decimal strings and U128 wrappers", () => {
+    assert.equal(u128ToBigInt("2000000000000000000000000", "t"), 2000000000000000000000000n);
+    assert.equal(u128ToBigInt({ U128: "5" }, "t"), 5n);
+    assert.equal(u128ToBigInt({ u128: "7" }, "t"), 7n);
+  });
+
+  it("rejects non-numeric shapes", () => {
+    assert.throws(() => u128ToBigInt("1.5", "treasury"), /bad U128 shape/);
+    assert.throws(() => u128ToBigInt(null, "treasury"), /bad U128 shape/);
   });
 });
 
