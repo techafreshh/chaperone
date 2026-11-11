@@ -164,6 +164,17 @@ pub(crate) fn log_request_rejected(request: &PaymentRequest) {
     emit("request_rejected", &data);
 }
 
+pub(crate) fn log_request_failed(request: &PaymentRequest) {
+    let reason = request.reason.as_deref().unwrap_or("");
+    let data = format!(
+        "{{\"request_id\":{},\"agent_id\":\"{}\",\"reason\":\"{}\"}}",
+        request.request_id,
+        escape_json(request.agent_id.as_str()),
+        escape_json(reason)
+    );
+    emit("request_failed", &data);
+}
+
 pub(crate) fn log_verdict_recorded(request_id: u64, consistent: bool) {
     let data = format!(
         "{{\"request_id\":{},\"consistent\":{}}}",

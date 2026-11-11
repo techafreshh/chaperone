@@ -56,7 +56,7 @@ mod tests {
     use near_sdk::json_types::U128;
     use near_sdk::test_utils::VMContextBuilder;
     use near_sdk::testing_env;
-    use near_sdk::AccountId;
+    use near_sdk::{AccountId, NearToken};
 
     const OWNER: &str = "owner.testnet";
     const ONE_NEAR: u128 = 1_000_000_000_000_000_000_000_000;
@@ -94,8 +94,18 @@ mod tests {
         bs58::encode(key.verifying_key().to_bytes()).into_string()
     }
 
+    fn fund_treasury(guard: &mut Guard, amount_yocto: u128) {
+        let context = VMContextBuilder::new()
+            .predecessor_account_id(OWNER.parse().unwrap())
+            .attached_deposit(NearToken::from_yoctonear(amount_yocto))
+            .build();
+        testing_env!(context);
+        guard.deposit_fleet_funds();
+    }
+
     /// Stages three clean requests (ids 1, 2, 3) mirroring the issue's
-    /// known agent/payee/amount/ref shape, with the verifier registered.
+    /// known agent/payee/amount/ref shape, with the verifier registered
+    /// and 100 NEAR in the logical treasury so consistent verdicts pay.
     fn staged_guard() -> (Guard, SigningKey) {
         let mut guard = fresh_guard();
         let key = signing_key();
@@ -111,6 +121,7 @@ mod tests {
             U128::from(50 * ONE_NEAR),
         );
         guard.set_verifier(Some(key_base58(&key)));
+        fund_treasury(&mut guard, 100 * ONE_NEAR);
         for _ in 0..3 {
             set_predecessor("agent.near");
             let outcome = guard.request_payment(
@@ -225,14 +236,143 @@ mod tests {
     }
 
     #[test]
-    fn submit_consistent_verdict_pays_request_one() {
+    fn submit_consistent_verdict_starts_payout_for_request_two() {
         let (mut guard, key) = staged_guard();
         set_predecessor("anyone.near");
         let sig = sign_as(&key, &guard, 2, true);
         guard.submit_verdict(2, true, sig);
+        // Funded: `staged -> paying`, treasury debited at once; the
+        // private `on_payout` callback settles `paid` later.
+        let stored = guard.get_request(2).expect("request must exist");
+        assert_eq!(stored.status, "paying");
+        assert_eq!(stored.reason, None);
+        assert_eq!(
+            guard.treasury(),
+            U128::from(100 * ONE_NEAR - 5 * ONE_NEAR)
+        );
+        // In-flight payouts never join the approval queue.
+        assert!(guard.list_queue().is_empty());
+        assert_eq!(guard.fleet_summary().pending_queue, 0);
+    }
+
+    #[test]
+    fn settle_success_marks_paid_and_keeps_treasury_debited() {
+        let (mut guard, key) = staged_guard();
+        set_predecessor("anyone.near");
+        let sig = sign_as(&key, &guard, 2, true);
+        guard.submit_verdict(2, true, sig);
+        guard.settle_payout(2, true);
         let stored = guard.get_request(2).expect("request must exist");
         assert_eq!(stored.status, "paid");
         assert_eq!(stored.reason, None);
+        assert_eq!(
+            guard.treasury(),
+            U128::from(100 * ONE_NEAR - 5 * ONE_NEAR)
+        );
+        // The 15 NEAR drawn at intake stays drawn after success.
+        let view = guard
+            .get_agent("agent.near".parse().unwrap())
+            .expect("agent must be registered");
+        assert_eq!(view.spent_today_yocto, U128::from(15 * ONE_NEAR));
+    }
+
+    #[test]
+    fn settle_failure_restores_treasury_and_spend() {
+        let (mut guard, key) = staged_guard();
+        set_predecessor("anyone.near");
+        let sig = sign_as(&key, &guard, 2, true);
+        guard.submit_verdict(2, true, sig);
+        assert_eq!(
+            guard.treasury(),
+            U128::from(100 * ONE_NEAR - 5 * ONE_NEAR)
+        );
+        guard.settle_payout(2, false);
+        let stored = guard.get_request(2).expect("request must exist");
+        assert_eq!(stored.status, "failed");
+        assert_eq!(stored.reason, Some("TransferFailed".to_string()));
+        assert_eq!(guard.treasury(), U128::from(100 * ONE_NEAR));
+        // The failed 5 NEAR is released: intake drew 15, one is back.
+        let view = guard
+            .get_agent("agent.near".parse().unwrap())
+            .expect("agent must be registered");
+        assert_eq!(view.spent_today_yocto, U128::from(10 * ONE_NEAR));
+        assert!(guard.list_queue().is_empty());
+        assert_eq!(guard.fleet_summary().pending_queue, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Request is not paying")]
+    fn settle_non_paying_request_panics() {
+        let (mut guard, _key) = staged_guard();
+        set_predecessor("anyone.near");
+        // Request 1 is still staged: only `paying` rows settle.
+        guard.settle_payout(1, true);
+    }
+
+    #[test]
+    fn consistent_verdict_without_funds_holds_with_insufficient_treasury() {
+        let (mut guard, key) = staged_guard();
+        set_predecessor(OWNER);
+        let _ = guard.withdraw_fleet_funds(
+            OWNER.parse().unwrap(),
+            U128::from(100 * ONE_NEAR),
+        );
+        assert_eq!(guard.treasury(), U128::from(0));
+
+        set_predecessor("anyone.near");
+        let sig = sign_as(&key, &guard, 2, true);
+        guard.submit_verdict(2, true, sig);
+        let stored = guard.get_request(2).expect("request must exist");
+        assert_eq!(stored.status, "held");
+        assert_eq!(stored.reason, Some("InsufficientTreasury".to_string()));
+        // Nothing moved: no debit, no spend release, still queued.
+        assert_eq!(guard.treasury(), U128::from(0));
+        assert_eq!(guard.list_queue().len(), 1);
+        assert_eq!(guard.list_queue()[0].request_id, 2);
+        assert_eq!(guard.fleet_summary().pending_queue, 1);
+    }
+
+    #[test]
+    fn approve_hold_without_funds_panics_then_pays_after_top_up() {
+        let (mut guard, key) = staged_guard();
+        set_predecessor("anyone.near");
+        guard.submit_verdict(3, false, sign_as(&key, &guard, 3, false));
+        assert_eq!(
+            guard.get_request(3).expect("request must exist").status,
+            "held"
+        );
+
+        set_predecessor(OWNER);
+        let _ = guard.withdraw_fleet_funds(
+            OWNER.parse().unwrap(),
+            U128::from(100 * ONE_NEAR),
+        );
+        let denied = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            guard.approve_hold(3);
+        }));
+        match denied {
+            Ok(()) => panic!("underfunded approve_hold must panic"),
+            Err(payload) => {
+                let msg = payload.downcast_ref::<String>().cloned().unwrap_or_default();
+                assert!(
+                    msg.contains("Insufficient treasury"),
+                    "unexpected approve_hold panic: {msg}"
+                );
+            }
+        }
+        assert_eq!(
+            guard.get_request(3).expect("request must exist").status,
+            "held"
+        );
+
+        // Top up and approve: `held -> paying` with the treasury debited.
+        fund_treasury(&mut guard, 5 * ONE_NEAR);
+        guard.approve_hold(3);
+        let stored = guard.get_request(3).expect("request must exist");
+        assert_eq!(stored.status, "paying");
+        assert_eq!(stored.reason, None);
+        assert_eq!(guard.treasury(), U128::from(0));
+        assert!(guard.list_queue().is_empty());
     }
 
     #[test]
@@ -267,7 +407,7 @@ mod tests {
         guard.submit_verdict(1, true, sig);
         assert_eq!(
             guard.get_request(1).expect("request must exist").status,
-            "paid"
+            "paying"
         );
     }
 
@@ -376,11 +516,11 @@ mod tests {
             guard.list_queue().len() as u64
         );
 
-        // A paid sibling stays out of the queue with the staged one.
+        // A paying sibling stays out of the queue with the staged one.
         guard.submit_verdict(2, true, sign_as(&key, &guard, 2, true));
         assert_eq!(
             guard.get_request(2).expect("request must exist").status,
-            "paid"
+            "paying"
         );
         assert_eq!(
             guard.get_request(3).expect("request must exist").status,
@@ -397,7 +537,7 @@ mod tests {
         guard.approve_hold(1);
         assert_eq!(
             guard.get_request(1).expect("request must exist").status,
-            "paid"
+            "paying"
         );
         guard.reject_hold(3);
         assert_eq!(
@@ -409,7 +549,7 @@ mod tests {
     }
 
     #[test]
-    fn approve_hold_pays_and_reject_hold_rejects() {
+    fn approve_hold_starts_payout_and_reject_hold_releases_spend() {
         let (mut guard, key) = staged_guard();
         set_predecessor("anyone.near");
         guard.submit_verdict(2, false, sign_as(&key, &guard, 2, false));
@@ -419,13 +559,27 @@ mod tests {
         set_predecessor(OWNER);
         guard.approve_hold(2);
         let approved = guard.get_request(2).expect("request must exist");
-        assert_eq!(approved.status, "paid");
+        assert_eq!(approved.status, "paying");
         assert_eq!(approved.reason, None);
+        assert_eq!(
+            guard.treasury(),
+            U128::from(100 * ONE_NEAR - 5 * ONE_NEAR)
+        );
 
         guard.reject_hold(3);
         let rejected = guard.get_request(3).expect("request must exist");
         assert_eq!(rejected.status, "rejected");
         assert_eq!(rejected.reason, Some("HoldRejected".to_string()));
+        // Intake drew 15 NEAR of allowance; the rejection releases 5.
+        let view = guard
+            .get_agent("agent.near".parse().unwrap())
+            .expect("agent must be registered");
+        assert_eq!(view.spent_today_yocto, U128::from(10 * ONE_NEAR));
+        // Rejections never transfer: the treasury only lost the payout.
+        assert_eq!(
+            guard.treasury(),
+            U128::from(100 * ONE_NEAR - 5 * ONE_NEAR)
+        );
 
         // Both leave the queue; nothing remains pending.
         assert!(guard.list_queue().is_empty());
