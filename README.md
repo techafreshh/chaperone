@@ -51,19 +51,28 @@ What those two commands do:
 
 | Route | What it shows |
 |---|---|
-| `/fleet` | The 4-agent fleet and per-agent state (tiers: live chain, fixture, stub file, disabled). |
+| `/fleet` | The 4-agent fleet and per-agent state (tiers: live chain, fixture, stub file, disabled). `frozen` renders only when the chain view says `active: false`, or on a row visibly labeled `fixture`. |
 | `/requests` | Payment requests with binary-honest attestation chips: `TEE-verified`, `unverifiable`, or `deterministic-only`. |
-| `/queue` | Held requests awaiting one-click approve/reject. |
+| `/queue` | Held requests awaiting one-click approve/reject. Rows stay `held` until the next chain read returns `paid`. |
 | `/receipts` | Receipt waterfall plus the CSV audit export. |
 | `/verify` | Live judged-verdict entry point (`POST /verify`). |
 | `/settings` | Guard contract binding and verifier key configuration. |
+
+### Owner actions are signed by the owner's wallet
+
+The app server holds no owner key and sends no owner transactions. Every owner method (`approve_hold`, `reject_hold`, `set_agent_active`, `set_verifier`, `register_agent`, `set_agent_policy`) is sent from the browser through the operator's NEAR wallet (MyNearWallet or Meteor via `@near-wallet-selector`); the contract's owner check is the only authorization. After a wallet transaction the UI re-reads chain state and shows the result with a testnet explorer link to the transaction. On error it shows the error and changes nothing. Agent key revocation stays an operator CLI (`scripts/revoke-key.sh`); the UI kill switch is the on-chain freeze.
+
+- **Live tier** (`GUARD_CONTRACT_ID` set): connect the owner wallet, click Approve/Reject/Freeze/Revive/Rotate — the wallet signs the `FunctionCall` to the guard contract. The server's owner-write routes answer `403 {"error":"sign with the owner wallet"}` and send nothing.
+- **Fixture tier** (no contract id): the same buttons act on the in-memory fixture so the flow is clickable with zero credentials, and every row they change is visibly labeled `fixture`.
 
 ### APIs
 
 - `GET /api/health` → `{"ok": true}` (quickstart health assertion).
 - `GET /api/audit/export?format=csv` → receipts CSV starting with `request_id,status,verdict_signature,chain_tx`.
-- `POST /api/queue/[id]/approve` and `POST /api/queue/[id]/reject` — human decision on held requests.
-- `POST /api/agents/[id]/kill` (on-chain freeze + key revocation) and `POST /api/agents/[id]/revive`.
+- `POST /api/queue/[id]/approve` and `POST /api/queue/[id]/reject` — human decision on held requests. Fixture tier: applies the in-memory overlay (`200 {"status":"paid"}` / `{"status":"rejected"}`). Live tier: `403 {"error":"sign with the owner wallet"}` — sign `approve_hold` / `reject_hold` with the owner wallet instead.
+- `POST /api/agents/[id]/kill` (on-chain freeze) and `POST /api/agents/[id]/revive`. Fixture tier: flips the in-memory overlay (`200 {"active":false}` / `{"active":true}`). Live tier: `403 {"error":"sign with the owner wallet"}` — sign `set_agent_active` with the owner wallet instead.
+- `POST /api/agents` / `PATCH /api/agents` — agent registry/policy writes. Fixture tier only; live tier answers `403 {"error":"sign with the owner wallet"}` — sign `register_agent` / `set_agent_policy` with the owner wallet instead.
+- `POST /api/settings/verifier-key` — verifier key rotation. Fixture tier only; live tier answers `403 {"error":"sign with the owner wallet"}` — sign `set_verifier` with the owner wallet instead.
 - `POST /api/attestation/preflight` (alias: `/attestation/preflight`) — live preflight against NEAR AI Cloud when `NEAR_AI_API_KEY` is set, fixture mode otherwise.
 
 ### MCP
@@ -88,10 +97,11 @@ Only the variables the code actually reads. CLI flags override env in every scri
 
 | Variable | Used by | Default |
 |---|---|---|
-| `GUARD_CONTRACT_ID` | Attack/chain gates (`resolveGuardId`), app chain tiers (`fleet`, `queue`, `receipts`, `verify`), MCP live adapter, mirror | _(none — live paths stay disabled/SKIP without it)_ |
+| `GUARD_CONTRACT_ID` | Live-tier toggle: app chain tiers (`fleet`, `queue`, `receipts`, `verify`), MCP live adapter, mirror. When set, server owner-write routes answer `403 {"error":"sign with the owner wallet"}` and all owner writes are wallet-signed in the browser | _(none — fixture tier without it)_ |
 | `NEAR_CONTRACT_ID` | Legacy fallback for the guard id in the same readers | _(none)_ |
-| `NEAR_ACCOUNT_ID` | Signer (guard owner + agent parent) for deploy, attack suite, fixtures, provision, seed-books, fund, revoke, verify | `signer.testnet` placeholder in `--dry-run` plans only |
-| `NEAR_PRIVATE_KEY` | Signer key (`ed25519:…`) for the same writers | _(none — live writes fail closed without it)_ |
+| `NEAR_ACCOUNT_ID` | Signer (guard owner + agent parent) for deploy, attack suite, fixtures, provision, seed-books, fund, revoke | `signer.testnet` placeholder in `--dry-run` plans only |
+| `NEAR_PRIVATE_KEY` | Signer key (`ed25519:…`) for operator CLIs under `scripts/` only — no code under `app/` reads it | _(none — live writes fail closed without it)_ |
+| `VERIFIER_ACCOUNT_ID` / `VERIFIER_PRIVATE_KEY` | Dedicated submitter for live `/verify` verdict writes (never the owner key) | _(none — `/verify` serves the fixture stack without them)_ |
 | `NEAR_RPC_URL` | All NEAR RPC callers | `https://rpc.testnet.near.org` |
 | `SUPABASE_URL` / `SUPABASE_SERVICE_KEY` | Supabase mirror target | _(none — mirror is disabled without both)_ |
 | `MIRROR_POLL_MS` | `mirror-sync` poll interval | `15000` |

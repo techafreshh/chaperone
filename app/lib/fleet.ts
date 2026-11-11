@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import fs from "node:fs";
+import { isLiveTier, liveWriteBlocked } from "./guard";
 import { getMirrorStatus } from "./supabase";
 import { capToYocto } from "./books";
 import type { Env } from "./env";
@@ -8,9 +9,10 @@ import type { Env } from "./env";
 // Supabase mirror `agents` table first, live chain views (`list_agents`,
 // `treasury`/`fleet_summary` via plain JSON-RPC `fetch`) second, fixture
 // fallback third — with the chain's `active` flag authoritative for the
-// `frozen` label. Writes go to an in-process overlay (plus best-effort
-// mirror upsert / chain submit when live creds exist) so the next
-// `GET /fleet` in the same server process reflects `POST /api/agents`.
+// `frozen` label. Writes go to a fixture-tier in-process overlay (plus
+// best-effort mirror upsert) so the next `GET /fleet` in the same server
+// process reflects `POST /api/agents`; on the live tier the server sends
+// nothing and owner writes are wallet-signed in the browser (issue #62).
 //
 // Yocto amounts stay decimal strings end-to-end (Postgres TEXT, u128);
 // display formatting uses exact `BigInt` math, never floats. Direct
@@ -479,18 +481,38 @@ export async function getFleetState(
   }
   let chainReady = false;
   let chainTreasury: string | null = null;
+  const chainAgents = new Map<string, FleetAgent>();
   try {
     const chain = await loadChainState(fetchImpl, env);
     if (chain.state === "ready") {
       chainReady = true;
       chainTreasury = chain.treasuryYocto;
-      for (const agent of chain.agents) placeRead(agent);
+      for (const agent of chain.agents) {
+        chainAgents.set(agent.agent_id, { ...agent });
+        placeRead(agent);
+      }
     }
   } catch {
     chainReady = false;
   }
-  for (const agent of overlay.values()) {
-    merged.set(agent.agent_id, { ...agent });
+  // Chain is the source of truth when ready: every agent the chain
+  // returns takes `active` (and the full row) from the chain view only,
+  // so a stale mirror/stub/fixture/overlay `active:false` can never
+  // freeze an agent the chain reports active.
+  if (chainReady) {
+    for (const [id, chainAgent] of chainAgents) {
+      merged.set(id, { ...chainAgent });
+    }
+  }
+  // The overlay is fixture-tier only: on the live tier the server sends
+  // nothing and every owner write is wallet-signed in the browser.
+  if (!isLiveTier(env)) {
+    for (const agent of overlay.values()) {
+      // When the chain tier is ready, an overlay row for a chain-owned
+      // agent must not contradict the chain view.
+      if (chainReady && chainAgents.has(agent.agent_id)) continue;
+      merged.set(agent.agent_id, { ...agent });
+    }
   }
 
   const agents = [...merged.values()].sort((a, b) =>
@@ -605,11 +627,11 @@ function resolveAmount(
   return fallback;
 }
 
-// Best-effort persistence behind live creds. Mirror upserts fire when the
-// mirror is configured; the live chain-submit path stays wallet-signed and
-// out of band (this dependency-free layer cannot sign), so with only an
-// RPC contract id configured there is nothing further to attempt. Either
-// way failures never fail the 200 — the overlay already holds the write.
+// Best-effort persistence. Mirror upserts fire when the mirror is
+// configured; the live chain-submit path stays wallet-signed and out of
+// band (this dependency-free layer cannot sign), so with only an RPC
+// contract id configured there is nothing further to attempt. Either way
+// failures never fail the 200 — the overlay already holds the write.
 async function bestEffortPersist(
   agent: FleetAgent,
   fetchImpl: typeof fetch,
@@ -661,14 +683,16 @@ export async function handleAgentsGet(
 }
 
 // Fixture-tier write: any caller is accepted as the owner (labeled
-// fixture-write); live owner gating happens via wallet-signed chain tx,
-// not this route. 400 only on missing/empty `agent_id`.
+// fixture-write). On the live tier the server sends nothing: the operator
+// signs `register_agent`/`set_agent_policy` with the owner wallet in the
+// browser. 400 only on missing/empty `agent_id`.
 export async function handleAgentsPost(
   request: Request,
   deps: { fetchImpl?: typeof fetch; env?: Env } = {},
 ): Promise<NextResponse> {
   const fetchImpl = deps.fetchImpl ?? fetch;
   const env = deps.env ?? process.env;
+  if (isLiveTier(env)) return liveWriteBlocked();
   const body = await readBodyMap(request);
   const rawId = pickField(body, "agent_id", "agentId", "id");
   if (rawId === undefined || rawId.trim() === "") {
@@ -736,6 +760,7 @@ export async function handleAgentsPatch(
 ): Promise<NextResponse> {
   const fetchImpl = deps.fetchImpl ?? fetch;
   const env = deps.env ?? process.env;
+  if (isLiveTier(env)) return liveWriteBlocked();
   const body = await readBodyMap(request);
   const rawId = pickField(body, "agent_id", "agentId", "id");
   if (rawId === undefined || rawId.trim() === "") {
@@ -823,11 +848,13 @@ export async function handleAgentsPatch(
   return NextResponse.json({ ok: true, agent_id }, { status: 200 });
 }
 
-// Owner-gated kill/revive write (issue #17): flip `active` on the merged
-// agent row and upsert the overlay so the next `GET /fleet` in the same
-// server process reflects the freeze. Unknown id -> null (the route maps
-// to 404); allowance/cap/spent carry over with `remainingOrComputed`, and
-// the existing best-effort persist never fails the 200.
+// Fixture-tier kill/revive write: flip `active` on the merged agent row
+// and upsert the overlay so the next `GET /fleet` in the same server
+// process reflects the freeze. The kill/revive routes answer the exact
+// 403 on the live tier before reaching here. Unknown id -> null (the
+// route maps to 404); allowance/cap/spent carry over with
+// `remainingOrComputed`, and the existing best-effort persist never fails
+// the 200.
 export async function setAgentActive(
   agent_id: string,
   active: boolean,

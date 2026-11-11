@@ -2,16 +2,17 @@
 // read tiers — fixture, stub file (`QUEUE_STUB_FILE` then
 // `REQUESTS_STUB_FILE`), Supabase mirror (`requests` with
 // `status=eq.held`), live chain `list_queue` — plus a killed-agent join for
-// the `agent frozen` banner. Writes go to an in-process overlay (plus a
-// best-effort wallet-signed `approve_hold`/`reject_hold` when live creds
-// exist) so the next `GET /queue` in the same process reflects the
-// decision.
+// the `agent frozen` banner. Writes go to a fixture-tier in-process
+// overlay so the next `GET /queue` in the same process reflects the
+// decision; on the live tier the server sends nothing and owner writes
+// are wallet-signed in the browser (issue #62).
 //
 // Status strings mirror the contract exactly (`held`/`paid`/`rejected`,
 // `HoldRejected`); `AgentView.active` is the frozen source of truth.
 
 import { NextResponse } from "next/server";
 import fs from "node:fs";
+import { isLiveTier, liveWriteBlocked } from "./guard";
 import { getMirrorStatus } from "./supabase";
 import type { Env } from "./env";
 
@@ -474,11 +475,13 @@ export async function getQueueState(
     mirrorReady = false;
   }
   let chainReady = false;
+  const chainRows = new Map<number, QueueRow>();
   try {
     const chain = await loadChainQueue(fetchImpl, env);
     if (chain.state === "ready") {
       chainReady = true;
       for (const row of chain.requests) {
+        chainRows.set(row.request_id, { ...row });
         // Chain rows already carry joined `AgentView.active`; noting them
         // folds the authoritative liveness into the per-agent AND.
         place(row);
@@ -488,14 +491,31 @@ export async function getQueueState(
     chainReady = false;
   }
 
+  // Chain is the source of truth when ready: every row the chain returns
+  // takes its `status`/`active` from the chain row only, so a stale
+  // mirror/stub/fixture/overlay `active:false` can never freeze a row
+  // the chain reports active. Rows the chain does not return keep the
+  // frozen-wins merge below.
+  if (chainReady) {
+    for (const [id, chainRow] of chainRows) {
+      merged.set(id, { ...chainRow });
+    }
+  }
+
   // Propagate per-agent frozen-wins across request ids: any source that
-  // marks an agent inactive freezes all of its rows.
+  // marks an agent inactive freezes all of its rows. Skipped for rows
+  // the chain owns when the chain tier is ready (chain wins above).
   for (const row of merged.values()) {
+    if (chainReady && chainRows.has(row.request_id)) continue;
     const live = agentLiveness.get(row.agent_id);
     if (live !== undefined) row.active = row.active && live;
   }
-  for (const row of overlay.values()) {
-    merged.set(row.request_id, { ...row });
+  // The overlay is fixture-tier only: on the live tier the server sends
+  // nothing and every owner write is wallet-signed in the browser.
+  if (!isLiveTier(env)) {
+    for (const row of overlay.values()) {
+      merged.set(row.request_id, { ...row });
+    }
   }
 
   const requests = [...merged.values()]
@@ -545,113 +565,12 @@ async function getMergedAll(
   } catch {
     // Chain unreachable: file tiers still decide.
   }
-  for (const row of overlay.values()) merged.set(row.request_id, { ...row });
+  // The overlay is fixture-tier only: on the live tier the server sends
+  // nothing and every owner write is wallet-signed in the browser.
+  if (!isLiveTier(env)) {
+    for (const row of overlay.values()) merged.set(row.request_id, { ...row });
+  }
   return merged;
-}
-
-// Lazily import `near-api-js` so the live chain path never burdens the
-// offline/CI path (same pattern as the verifier's lazy load). The
-// specifier is intentionally non-literal so typechecking never resolves the
-// package statically; the operator installs it for live-tier runs.
-const NEAR_API_JS_SPECIFIER = "near-api-js";
-async function loadNearApi(): Promise<unknown> {
-  try {
-    return await import(/* webpackIgnore: true */ NEAR_API_JS_SPECIFIER);
-  } catch (error) {
-    throw new Error(
-      `live chain unavailable: near-api-js could not be loaded (${error instanceof Error ? error.message : String(error)})`,
-    );
-  }
-}
-
-export interface NearQueueChainOptions {
-  contractId: string;
-  accountId: string;
-  privateKey: string;
-  networkId?: string;
-  nodeUrl?: string;
-  fetchImpl?: typeof fetch;
-}
-
-export interface QueueChainAdapter {
-  approveHold(requestId: number): Promise<{ status: string }>;
-  rejectHold(requestId: number): Promise<{ status: string }>;
-}
-
-// Live chain adapter: `approve_hold`/`reject_hold` through `near-api-js`
-// function calls, selected when the contract plus signer env is set. Never
-// constructed in the fixture/test path.
-export function createQueueChainAdapter(
-  opts: NearQueueChainOptions,
-): QueueChainAdapter {
-  const networkId = opts.networkId ?? process.env.NEAR_NETWORK ?? "testnet";
-  const nodeUrl = opts.nodeUrl ?? process.env.NEAR_NODE_URL ?? "";
-  async function functionCall(
-    methodName: "approve_hold" | "reject_hold",
-    requestId: number,
-  ): Promise<void> {
-    const mod = (await loadNearApi()) as {
-      connect: (config: unknown) => Promise<{
-        account: (id: string) => Promise<{
-          functionCall: (args: unknown) => Promise<unknown>;
-        }>;
-      }>;
-      keyStores: {
-        InMemoryKeyStore: new () => {
-          setKey(n: string, a: string, k: unknown): Promise<void>;
-        };
-      };
-      KeyPair: { fromString(s: string): unknown };
-    };
-    const keyStore = new mod.keyStores.InMemoryKeyStore();
-    await keyStore.setKey(
-      networkId,
-      opts.accountId,
-      mod.KeyPair.fromString(opts.privateKey),
-    );
-    const near = await mod.connect({
-      networkId,
-      nodeUrl: nodeUrl !== "" ? nodeUrl : undefined,
-      keyStore,
-      ...(opts.fetchImpl !== undefined ? { fetch: opts.fetchImpl } : {}),
-    });
-    const account = await near.account(opts.accountId);
-    await account.functionCall({
-      contractId: opts.contractId,
-      methodName,
-      args: { request_id: requestId },
-    });
-  }
-  return {
-    async approveHold(requestId: number): Promise<{ status: string }> {
-      await functionCall("approve_hold", requestId);
-      return { status: "paid" };
-    },
-    async rejectHold(requestId: number): Promise<{ status: string }> {
-      await functionCall("reject_hold", requestId);
-      return { status: "rejected" };
-    },
-  };
-}
-
-function liveQueueAdapter(
-  env: Env,
-  fetchImpl: typeof fetch,
-): QueueChainAdapter | null {
-  const contractId = (
-    env.GUARD_CONTRACT_ID ??
-    env.NEAR_CONTRACT_ID ??
-    ""
-  ).trim();
-  const accountId = (env.NEAR_ACCOUNT_ID ?? "").trim();
-  const privateKey = (env.NEAR_PRIVATE_KEY ?? "").trim();
-  if (contractId === "" || accountId === "" || privateKey === "") return null;
-  return createQueueChainAdapter({
-    contractId,
-    accountId,
-    privateKey,
-    fetchImpl,
-  });
 }
 
 function parseQueueId(rawId: unknown): number | null {
@@ -667,21 +586,15 @@ function parseQueueId(rawId: unknown): number | null {
   return null;
 }
 
-function contractErrorToStatus(message: string): number | null {
-  if (message.includes("Request not found")) return 404;
-  if (message.includes("Request is not held")) return 409;
-  // Underfunded approve: the contract leaves the request `held`, so the
-  // overlay below must not mark it paid — surface 409 instead.
-  if (message.includes("Insufficient treasury")) return 409;
-  return null;
-}
-
 export async function handleQueueApprove(
   rawId: unknown,
   deps: { fetchImpl?: typeof fetch; env?: Env } = {},
 ): Promise<NextResponse> {
   const fetchImpl = deps.fetchImpl ?? fetch;
   const env = deps.env ?? process.env;
+  // Live tier: the server sends nothing; the operator signs `approve_hold`
+  // with the owner wallet in the browser.
+  if (isLiveTier(env)) return liveWriteBlocked();
   const requestId = parseQueueId(rawId);
   if (requestId === null) {
     return NextResponse.json(
@@ -693,22 +606,6 @@ export async function handleQueueApprove(
   const prev = merged.get(requestId);
   if (!prev || prev.status !== "held") {
     return NextResponse.json({ error: "Request not found" }, { status: 404 });
-  }
-
-  // Best-effort live submit when wallet creds exist; contract-identical
-  // errors map to 404/409, transport failures fall through to the overlay.
-  const adapter = liveQueueAdapter(env, fetchImpl);
-  if (adapter !== null) {
-    try {
-      await adapter.approveHold(requestId);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      const mapped = contractErrorToStatus(message);
-      if (mapped !== null) {
-        return NextResponse.json({ error: message }, { status: mapped });
-      }
-      // Best-effort only: the overlay below still holds the write.
-    }
   }
 
   overlay.set(requestId, {
@@ -726,6 +623,9 @@ export async function handleQueueReject(
 ): Promise<NextResponse> {
   const fetchImpl = deps.fetchImpl ?? fetch;
   const env = deps.env ?? process.env;
+  // Live tier: the server sends nothing; the operator signs `reject_hold`
+  // with the owner wallet in the browser.
+  if (isLiveTier(env)) return liveWriteBlocked();
   const requestId = parseQueueId(rawId);
   if (requestId === null) {
     return NextResponse.json(
@@ -737,20 +637,6 @@ export async function handleQueueReject(
   const prev = merged.get(requestId);
   if (!prev || prev.status !== "held") {
     return NextResponse.json({ error: "Request not found" }, { status: 404 });
-  }
-
-  const adapter = liveQueueAdapter(env, fetchImpl);
-  if (adapter !== null) {
-    try {
-      await adapter.rejectHold(requestId);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      const mapped = contractErrorToStatus(message);
-      if (mapped !== null) {
-        return NextResponse.json({ error: message }, { status: mapped });
-      }
-      // Best-effort only: the overlay below still holds the write.
-    }
   }
 
   overlay.set(requestId, {

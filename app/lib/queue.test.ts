@@ -305,6 +305,87 @@ describe("approve/reject overlay", () => {
   });
 });
 
+describe("live tier owner-write gate", () => {
+  const LIVE_ENV: Env = {
+    GUARD_CONTRACT_ID: "guard.testnet",
+    NEAR_ACCOUNT_ID: "owner.testnet",
+    NEAR_PRIVATE_KEY:
+      "ed25519:11un4TfVookQ35dGgFy3nxUCm7qM9yD8i2r9Jd9x9x9x9x9x9x9x9x9x9x9x9x9x9x9",
+  };
+
+  it("approve answers the exact 403 and mutates no overlay", async () => {
+    const res = await handleQueueApprove("6", {
+      fetchImpl: throwingFetch(),
+      env: LIVE_ENV,
+    });
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({
+      error: "sign with the owner wallet",
+    });
+    const state = await getQueueState({
+      fetchImpl: throwingFetch(),
+      env: LIVE_ENV,
+    });
+    expect(state.requests.some((row) => row.request_id === 6)).toBe(true);
+    expect(
+      state.requests.find((row) => row.request_id === 6)?.status,
+    ).toBe("held");
+  });
+
+  it("reject answers the exact 403 and mutates no overlay", async () => {
+    const res = await handleQueueReject(6, {
+      fetchImpl: throwingFetch(),
+      env: LIVE_ENV,
+    });
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({
+      error: "sign with the owner wallet",
+    });
+    const state = await getQueueState({
+      fetchImpl: throwingFetch(),
+      env: LIVE_ENV,
+    });
+    expect(state.requests.some((row) => row.request_id === 6)).toBe(true);
+  });
+});
+
+describe("chain-wins merge", () => {
+  it("chain active:true overrides an inactive stub row for the same id", async () => {
+    const file = writeStubFile([{ ...stubRow(6, { active: false }) }]);
+    const queueRow = stubRow(6, { active: true });
+    const rpcOk = (payload: unknown) => {
+      const bytes = Array.from(Buffer.from(JSON.stringify(payload), "utf8"));
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ result: { result: bytes } }),
+        text: async () => "",
+      } as unknown as Response;
+    };
+    const impl = (async (_url: unknown, init?: { body?: unknown }) => {
+      const bodyText = typeof init?.body === "string" ? init.body : "{}";
+      const method = (JSON.parse(bodyText) as { params?: { method_name?: string } })
+        .params?.method_name;
+      if (method === "list_queue") return rpcOk([queueRow]);
+      return {
+        ok: false,
+        status: 500,
+        json: async () => ({}),
+        text: async () => "",
+      } as unknown as Response;
+    }) as unknown as typeof fetch;
+    const env: Env = {
+      GUARD_CONTRACT_ID: "guard.testnet",
+      NEAR_RPC_URL: "https://rpc.testnet.near.org",
+      QUEUE_STUB_FILE: file,
+    };
+    const state = await getQueueState({ fetchImpl: impl, env });
+    expect(
+      state.requests.find((row) => row.request_id === 6)?.active,
+    ).toBe(true);
+  });
+});
+
 describe("queue page probe strings", () => {
   it("renders 6, reason mismatch, agent frozen, and approve-6", async () => {
     const html = renderToStaticMarkup(await QueuePage());
