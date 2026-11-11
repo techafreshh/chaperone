@@ -123,6 +123,7 @@ mod tests {
         guard.register_purpose_ref(
             "ref-1".to_string(),
             "Vendor".to_string(),
+            "payee.near".parse().unwrap(),
             U128::from(10u128),
         );
 

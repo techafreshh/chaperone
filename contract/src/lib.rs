@@ -24,9 +24,10 @@ use policy::{
 use request::{
     log_request_created, log_request_failed, log_request_rejected, PaymentOutcome, PaymentRequest,
     FAILED, HELD, PAID, PAYING, REASON_AGENT_INACTIVE, REASON_EXCEEDS_DAILY_ALLOWANCE,
-    REASON_EXCEEDS_PER_PAYMENT_CAP, REASON_EXCEEDS_PURPOSE_REF_CAP, REASON_HOLD_REJECTED,
+    REASON_EXCEEDS_PER_PAYMENT_CAP, REASON_EXCEEDS_PURPOSE_REF_REMAINING, REASON_HOLD_REJECTED,
     REASON_INSUFFICIENT_TREASURY, REASON_PAYEE_NOT_ALLOWLISTED, REASON_PURPOSE_REF_CLOSED,
-    REASON_PURPOSE_REF_NOT_FOUND, REASON_TRANSFER_FAILED, REJECTED, STAGED,
+    REASON_PURPOSE_REF_NOT_FOUND, REASON_PURPOSE_REF_PAYEE_MISMATCH,
+    REASON_PURPOSE_REF_VENDOR_MISMATCH, REASON_TRANSFER_FAILED, REJECTED, STAGED,
 };
 use verifier::{
     canonical_verdict_payload, decode_signature, decode_verifier_key, log_request_held,
@@ -204,10 +205,11 @@ impl Guard {
 
     /// Agent intake for a payment: deterministic on-chain checks run in a
     /// fixed order (active → per-payment cap → daily allowance → payee
-    /// allowlist → ref exists → ref open → ref covers amount) before any
-    /// judgment step. Failures are rejected-and-recorded with a
-    /// machine-readable reason; only clean requests are staged and draw
-    /// down the day's allowance. Every call consumes one `request_seq` id,
+    /// allowlist → ref exists → ref open → ref payee → ref vendor → ref
+    /// remaining) before any judgment step. Failures are
+    /// rejected-and-recorded with a machine-readable reason; only clean
+    /// requests commit their amount to the ref, draw down the day's
+    /// allowance, and stage. Every call consumes one `request_seq` id,
     /// starting at 1.
     /// Unknown callers panic with `"Agent not registered"`.
     pub fn request_payment(
@@ -277,7 +279,7 @@ impl Guard {
             );
         }
 
-        match self.purpose_refs.get(&purpose_ref).cloned() {
+        let remaining = match self.purpose_refs.get(&purpose_ref).cloned() {
             None => {
                 return self.reject(
                     agent_id,
@@ -301,7 +303,7 @@ impl Guard {
                         REASON_PURPOSE_REF_CLOSED,
                     );
                 }
-                if !Guard::within_allowance(amount_yocto.0, purpose_ref_record.max_amount_yocto.0) {
+                if payee != purpose_ref_record.payee {
                     return self.reject(
                         agent_id,
                         policy,
@@ -309,12 +311,39 @@ impl Guard {
                         amount_yocto,
                         purpose_ref,
                         vendor,
-                        REASON_EXCEEDS_PURPOSE_REF_CAP,
+                        REASON_PURPOSE_REF_PAYEE_MISMATCH,
                     );
                 }
+                if vendor != purpose_ref_record.vendor {
+                    return self.reject(
+                        agent_id,
+                        policy,
+                        payee,
+                        amount_yocto,
+                        purpose_ref,
+                        vendor,
+                        REASON_PURPOSE_REF_VENDOR_MISMATCH,
+                    );
+                }
+                let remaining = purpose_ref_record.remaining_yocto();
+                if amount_yocto.0 > remaining {
+                    return self.reject(
+                        agent_id,
+                        policy,
+                        payee,
+                        amount_yocto,
+                        purpose_ref,
+                        vendor,
+                        REASON_EXCEEDS_PURPOSE_REF_REMAINING,
+                    );
+                }
+                remaining
             }
-        }
-
+        };
+        let _ = remaining;
+        // Commit the amount to the ref before staging so double-spends
+        // against `remaining_yocto` fail deterministically.
+        self.commit_ref_amount(&purpose_ref, amount_yocto.0);
         policy.spent_today_yocto = U128::from(spent.saturating_add(amount_yocto.0));
         policy.last_spend_day = current_utc_day();
         self.agents.insert(agent_id.clone(), policy);
@@ -416,8 +445,9 @@ impl Guard {
     }
 
     /// Owner-only rejection of a held request: records it as rejected with
-    /// reason `HoldRejected` and releases the amount from the agent's
-    /// same-day spend (rejections never transfer). Emits `request_rejected`.
+    /// reason `HoldRejected`, releases the ref commitment and the amount
+    /// from the agent's same-day spend (rejections never transfer).
+    /// Emits `request_rejected`.
     pub fn reject_hold(&mut self, request_id: u64) {
         self.assert_owner();
         let mut record = self
@@ -429,6 +459,7 @@ impl Guard {
         record.status = REJECTED.to_string();
         record.reason = Some(REASON_HOLD_REJECTED.to_string());
         self.requests.insert(request_id, record.clone());
+        self.release_ref_amount(&record.purpose_ref, record.amount_yocto.0);
         self.release_spend(&record.agent_id, record.amount_yocto.0);
         log_request_rejected(&record);
     }
@@ -472,7 +503,9 @@ impl Guard {
     /// Shared settlement core so unit tests can cover both branches
     /// without executing promises (the host mock cannot produce a
     /// transfer result; the balance assertions belong in the sandbox
-    /// round trip instead).
+    /// round trip instead). Success moves the amount from committed to
+    /// paid and auto-closes the ref (emitting `purpose_ref_closed`) when
+    /// `paid` reaches the max; failure releases the ref commitment.
     fn settle_payout(&mut self, request_id: u64, succeeded: bool) {
         let mut record = self
             .requests
@@ -485,14 +518,57 @@ impl Guard {
             record.status = PAID.to_string();
             record.reason = None;
             self.requests.insert(request_id, record.clone());
+            self.mark_ref_paid(&record.purpose_ref, amount);
             log_request_paid(&record);
         } else {
             record.status = FAILED.to_string();
             record.reason = Some(REASON_TRANSFER_FAILED.to_string());
             self.requests.insert(request_id, record.clone());
             self.treasury_yocto = self.treasury_yocto.saturating_add(amount);
+            self.release_ref_amount(&record.purpose_ref, amount);
             self.release_spend(&record.agent_id, amount);
             log_request_failed(&record);
+        }
+    }
+
+    /// Commit helper: stage-time reservation against the ref's remaining.
+    /// Saturates so an (unreachable) over-commit never underflows; intake
+    /// already proved `amount <= remaining`.
+    fn commit_ref_amount(&mut self, ref_id: &str, amount: u128) {
+        if let Some(mut purpose_ref) = self.purpose_refs.get(&ref_id.to_string()).cloned() {
+            purpose_ref.committed_yocto =
+                U128::from(purpose_ref.committed_yocto.0.saturating_add(amount));
+            self.purpose_refs.insert(ref_id.to_string(), purpose_ref);
+        }
+    }
+
+    /// Release helper: unwind a stage-time reservation (rejected hold or
+    /// failed transfer). Saturates; missing refs (unreachable via intake)
+    /// are ignored.
+    fn release_ref_amount(&mut self, ref_id: &str, amount: u128) {
+        if let Some(mut purpose_ref) = self.purpose_refs.get(&ref_id.to_string()).cloned() {
+            purpose_ref.committed_yocto =
+                U128::from(purpose_ref.committed_yocto.0.saturating_sub(amount));
+            self.purpose_refs.insert(ref_id.to_string(), purpose_ref);
+        }
+    }
+
+    /// Paid helper: move the amount from committed to paid; when `paid`
+    /// reaches the max the ref closes itself and emits
+    /// `purpose_ref_closed`. Saturates defensively.
+    fn mark_ref_paid(&mut self, ref_id: &str, amount: u128) {
+        if let Some(mut purpose_ref) = self.purpose_refs.get(&ref_id.to_string()).cloned() {
+            purpose_ref.committed_yocto =
+                U128::from(purpose_ref.committed_yocto.0.saturating_sub(amount));
+            purpose_ref.paid_yocto =
+                U128::from(purpose_ref.paid_yocto.0.saturating_add(amount));
+            if purpose_ref.open && purpose_ref.paid_yocto.0 >= purpose_ref.max_amount_yocto.0 {
+                purpose_ref.open = false;
+                self.purpose_refs.insert(ref_id.to_string(), purpose_ref);
+                log_purpose_ref_closed(ref_id);
+            } else {
+                self.purpose_refs.insert(ref_id.to_string(), purpose_ref);
+            }
         }
     }
 
@@ -599,6 +675,7 @@ impl Guard {
         &mut self,
         ref_id: String,
         vendor: String,
+        payee: AccountId,
         max_amount_yocto: U128,
     ) {
         self.assert_owner();
@@ -610,11 +687,14 @@ impl Guard {
             ref_id.clone(),
             PurposeRef {
                 vendor: vendor.clone(),
+                payee: payee.clone(),
                 max_amount_yocto,
+                committed_yocto: U128::from(0),
+                paid_yocto: U128::from(0),
                 open: true,
             },
         );
-        log_purpose_ref_registered(&ref_id, &vendor, max_amount_yocto);
+        log_purpose_ref_registered(&ref_id, &vendor, &payee, max_amount_yocto);
     }
 
     pub fn close_purpose_ref(&mut self, ref_id: String) {

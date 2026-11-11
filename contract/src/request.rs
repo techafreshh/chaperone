@@ -38,8 +38,13 @@ pub(crate) const REASON_PAYEE_NOT_ALLOWLISTED: &str = "PayeeNotAllowlisted";
 pub(crate) const REASON_PURPOSE_REF_NOT_FOUND: &str = "PurposeRefNotFound";
 /// Rejection reason for requests citing a closed purpose ref.
 pub(crate) const REASON_PURPOSE_REF_CLOSED: &str = "PurposeRefClosed";
-/// Rejection reason for requests above the purpose ref's max amount.
-pub(crate) const REASON_EXCEEDS_PURPOSE_REF_CAP: &str = "ExceedsPurposeRefCap";
+/// Rejection reason for requests naming a purpose ref bound to a different payee.
+pub(crate) const REASON_PURPOSE_REF_PAYEE_MISMATCH: &str = "PurposeRefPayeeMismatch";
+/// Rejection reason for requests whose vendor differs from the ref's vendor.
+pub(crate) const REASON_PURPOSE_REF_VENDOR_MISMATCH: &str = "PurposeRefVendorMismatch";
+/// Rejection reason for requests above the ref's remaining (max minus
+/// committed minus paid) amount. Replaces `ExceedsPurposeRefCap`.
+pub(crate) const REASON_EXCEEDS_PURPOSE_REF_REMAINING: &str = "ExceedsPurposeRefRemaining";
 
 /// On-chain payment request (contract storage; doubles as the
 /// `get_request` view since the id is embedded).
@@ -115,6 +120,7 @@ mod tests {
                 guard.register_purpose_ref(
                     ref_id.to_string(),
                     "Vendor".to_string(),
+                    "payee.near".parse().unwrap(),
                     U128::from(1_000 * ONE_NEAR),
                 );
             }
@@ -266,7 +272,7 @@ mod tests {
     }
 
     // ---- issue #4 acceptance vectors: agent cap 10N, allowance 50N,
-    // allowlist [good.near], ref invoice-114 cap 30N ----
+    // allowlist [good.near], ref invoice-114 (CoreWeave/good.near) cap 50N ----
 
     const FIVE_NEAR: u128 = 5 * ONE_NEAR;
 
@@ -281,7 +287,8 @@ mod tests {
         guard.register_purpose_ref(
             "invoice-114".to_string(),
             "CoreWeave".to_string(),
-            U128::from(30 * ONE_NEAR),
+            "good.near".parse().unwrap(),
+            U128::from(50 * ONE_NEAR),
         );
         guard
     }
@@ -484,7 +491,7 @@ mod tests {
     }
 
     #[test]
-    fn amount_above_ref_cap_yields_exceeds_purpose_ref_cap() {
+    fn amount_above_remaining_yields_exceeds_purpose_ref_remaining() {
         let mut guard = fresh_guard();
         guard.register_agent(
             "big.near".parse().unwrap(),
@@ -494,11 +501,13 @@ mod tests {
         );
         guard.register_purpose_ref(
             "small-ref".to_string(),
-            "Vendor".to_string(),
+            "CoreWeave".to_string(),
+            "good.near".parse().unwrap(),
             U128::from(30 * ONE_NEAR),
         );
 
-        // 50N fits the agent cap and allowance but exceeds the 30N ref cap.
+        // 50N fits the agent cap and allowance but exceeds the 30N ref
+        // remaining (nothing committed yet, so remaining == max).
         let outcome = request_for(
             &mut guard,
             "big.near",
@@ -509,8 +518,215 @@ mod tests {
         assert_eq!(outcome.status, REJECTED);
         assert_eq!(
             outcome.reason,
-            Some(REASON_EXCEEDS_PURPOSE_REF_CAP.to_string())
+            Some(REASON_EXCEEDS_PURPOSE_REF_REMAINING.to_string())
         );
+    }
+
+    // ---- issue #61 acceptance vectors: ref invoice-114 binds one payee ----
+
+    const PAYEE_A: &str = "a.near";
+    const PAYEE_B: &str = "b.near";
+
+    fn ref61_guard() -> Guard {
+        let mut guard = fresh_guard();
+        guard.register_agent(
+            "agent.near".parse().unwrap(),
+            U128::from(200 * ONE_NEAR),
+            U128::from(100 * ONE_NEAR),
+            vec![PAYEE_A.parse().unwrap(), PAYEE_B.parse().unwrap()],
+        );
+        guard.register_purpose_ref(
+            "invoice-114".to_string(),
+            "CoreWeave".to_string(),
+            PAYEE_A.parse().unwrap(),
+            U128::from(50 * ONE_NEAR),
+        );
+        guard
+    }
+
+    fn request61(
+        guard: &mut Guard,
+        caller: &str,
+        payee: &str,
+        amount: u128,
+        vendor: &str,
+    ) -> PaymentOutcome {
+        let context = VMContextBuilder::new()
+            .predecessor_account_id(caller.parse().unwrap())
+            .build();
+        testing_env!(context);
+        guard.request_payment(
+            payee.parse().unwrap(),
+            U128::from(amount),
+            "invoice-114".to_string(),
+            vendor.to_string(),
+        )
+    }
+
+    #[test]
+    fn wrong_payee_citing_bound_ref_yields_payee_mismatch() {
+        let mut guard = ref61_guard();
+        // Allowlisted B cites a ref bound to A: payee gate fires.
+        let outcome = request61(&mut guard, "agent.near", PAYEE_B, 30 * ONE_NEAR, "CoreWeave");
+        assert_eq!(outcome.status, REJECTED);
+        assert_eq!(
+            outcome.reason,
+            Some(REASON_PURPOSE_REF_PAYEE_MISMATCH.to_string())
+        );
+        let stored = guard.get_request(outcome.request_id).expect("recorded");
+        assert_eq!(stored.reason, Some(REASON_PURPOSE_REF_PAYEE_MISMATCH.to_string()));
+        // Rejections commit nothing and draw no allowance.
+        let view = guard.get_purpose_ref("invoice-114".to_string()).expect("ref");
+        assert_eq!(view.remaining_yocto, U128::from(50 * ONE_NEAR));
+        let agent = guard.get_agent("agent.near".parse().unwrap()).expect("agent");
+        assert_eq!(agent.remaining_today_yocto, U128::from(200 * ONE_NEAR));
+    }
+
+    #[test]
+    fn vendor_case_mismatch_yields_vendor_mismatch() {
+        let mut guard = ref61_guard();
+        // Exact-string vendor compare: "Coreweave" != "CoreWeave".
+        let outcome = request61(&mut guard, "agent.near", PAYEE_A, ONE_NEAR, "Coreweave");
+        assert_eq!(outcome.status, REJECTED);
+        assert_eq!(
+            outcome.reason,
+            Some(REASON_PURPOSE_REF_VENDOR_MISMATCH.to_string())
+        );
+    }
+
+    #[test]
+    fn second_payment_above_remaining_yields_remaining_error() {
+        let mut guard = ref61_guard();
+        let first = request61(&mut guard, "agent.near", PAYEE_A, 30 * ONE_NEAR, "CoreWeave");
+        assert_eq!(first.status, STAGED);
+        let view = guard.get_purpose_ref("invoice-114".to_string()).expect("ref");
+        assert_eq!(view.remaining_yocto, U128::from(20 * ONE_NEAR));
+        assert_eq!(view.committed_yocto, U128::from(30 * ONE_NEAR));
+        // 30 no longer fits in the 20 left.
+        let second = request61(&mut guard, "agent.near", PAYEE_A, 30 * ONE_NEAR, "CoreWeave");
+        assert_eq!(second.status, REJECTED);
+        assert_eq!(
+            second.reason,
+            Some(REASON_EXCEEDS_PURPOSE_REF_REMAINING.to_string())
+        );
+        // The fitting 20 still stages.
+        let third = request61(&mut guard, "agent.near", PAYEE_A, 20 * ONE_NEAR, "CoreWeave");
+        assert_eq!(third.status, STAGED);
+        let view = guard.get_purpose_ref("invoice-114".to_string()).expect("ref");
+        assert_eq!(view.remaining_yocto, U128::from(0));
+    }
+
+    #[test]
+    fn held_reject_releases_remaining() {
+        use crate::policy::NANOS_PER_DAY;
+        let _ = NANOS_PER_DAY;
+        let mut guard = ref61_guard();
+        // Register a verifier key so an inconsistent verdict can hold.
+        use ed25519_dalek::Signer;
+        let signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let key58 = bs58::encode(signing.verifying_key().to_bytes()).into_string();
+        set_predecessor(OWNER);
+        guard.set_verifier(Some(key58));
+        let staged = request61(&mut guard, "agent.near", PAYEE_A, 10 * ONE_NEAR, "CoreWeave");
+        assert_eq!(staged.status, STAGED);
+        assert_eq!(
+            guard.get_purpose_ref("invoice-114".to_string()).expect("ref").remaining_yocto,
+            U128::from(40 * ONE_NEAR)
+        );
+        // Hold via an inconsistent verdict (anyone may submit).
+        set_predecessor("anyone.near");
+        let record = guard.get_request(staged.request_id).expect("staged");
+        let payload = crate::verifier::canonical_verdict_payload(&record, false);
+        let sig = bs58::encode(signing.sign(&payload).to_bytes()).into_string();
+        guard.submit_verdict(staged.request_id, false, sig);
+        assert_eq!(guard.get_request(staged.request_id).expect("held").status, HELD);
+        // Still committed while held.
+        assert_eq!(
+            guard.get_purpose_ref("invoice-114".to_string()).expect("ref").remaining_yocto,
+            U128::from(40 * ONE_NEAR)
+        );
+        set_predecessor(OWNER);
+        guard.reject_hold(staged.request_id);
+        assert_eq!(
+            guard.get_purpose_ref("invoice-114".to_string()).expect("ref").remaining_yocto,
+            U128::from(50 * ONE_NEAR)
+        );
+    }
+
+    #[test]
+    fn paid_moves_committed_to_paid_and_closes_at_max() {
+        let mut guard = ref61_guard();
+        use ed25519_dalek::Signer;
+        let signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let key58 = bs58::encode(signing.verifying_key().to_bytes()).into_string();
+        set_predecessor(OWNER);
+        guard.set_verifier(Some(key58));
+        // Fund the treasury so consistent verdicts pay.
+        let ctx = VMContextBuilder::new()
+            .predecessor_account_id(OWNER.parse().unwrap())
+            .attached_deposit(near_sdk::NearToken::from_yoctonear(100 * ONE_NEAR))
+            .build();
+        testing_env!(ctx);
+        guard.deposit_fleet_funds();
+        // First 30 stages then pays.
+        let first = request61(&mut guard, "agent.near", PAYEE_A, 30 * ONE_NEAR, "CoreWeave");
+        assert_eq!(first.status, STAGED);
+        set_predecessor("anyone.near");
+        let record = guard.get_request(first.request_id).expect("staged");
+        let payload = crate::verifier::canonical_verdict_payload(&record, true);
+        let sig = bs58::encode(signing.sign(&payload).to_bytes()).into_string();
+        guard.submit_verdict(first.request_id, true, sig);
+        assert_eq!(guard.get_request(first.request_id).expect("paying").status, PAYING);
+        guard.settle_payout(first.request_id, true);
+        let view = guard.get_purpose_ref("invoice-114".to_string()).expect("ref");
+        assert_eq!(view.paid_yocto, U128::from(30 * ONE_NEAR));
+        assert_eq!(view.committed_yocto, U128::from(0));
+        assert_eq!(view.remaining_yocto, U128::from(20 * ONE_NEAR));
+        assert!(view.open);
+        // Second 30 exceeds the 20 left.
+        let second = request61(&mut guard, "agent.near", PAYEE_A, 30 * ONE_NEAR, "CoreWeave");
+        assert_eq!(second.reason, Some(REASON_EXCEEDS_PURPOSE_REF_REMAINING.to_string()));
+        // Fitting 20 pays and closes the ref.
+        let third = request61(&mut guard, "agent.near", PAYEE_A, 20 * ONE_NEAR, "CoreWeave");
+        assert_eq!(third.status, STAGED);
+        set_predecessor("anyone.near");
+        let record = guard.get_request(third.request_id).expect("staged");
+        let payload = crate::verifier::canonical_verdict_payload(&record, true);
+        let sig = bs58::encode(signing.sign(&payload).to_bytes()).into_string();
+        guard.submit_verdict(third.request_id, true, sig);
+        guard.settle_payout(third.request_id, true);
+        let view = guard.get_purpose_ref("invoice-114".to_string()).expect("ref");
+        assert_eq!(view.paid_yocto, U128::from(50 * ONE_NEAR));
+        assert!(!view.open, "ref closes when paid reaches max");
+        assert_eq!(view.remaining_yocto, U128::from(0));
+    }
+
+    #[test]
+    fn failed_transfer_releases_commitment() {
+        let mut guard = ref61_guard();
+        use ed25519_dalek::Signer;
+        let signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let key58 = bs58::encode(signing.verifying_key().to_bytes()).into_string();
+        set_predecessor(OWNER);
+        guard.set_verifier(Some(key58));
+        let ctx = VMContextBuilder::new()
+            .predecessor_account_id(OWNER.parse().unwrap())
+            .attached_deposit(near_sdk::NearToken::from_yoctonear(100 * ONE_NEAR))
+            .build();
+        testing_env!(ctx);
+        guard.deposit_fleet_funds();
+        let staged = request61(&mut guard, "agent.near", PAYEE_A, 10 * ONE_NEAR, "CoreWeave");
+        assert_eq!(staged.status, STAGED);
+        set_predecessor("anyone.near");
+        let record = guard.get_request(staged.request_id).expect("staged");
+        let payload = crate::verifier::canonical_verdict_payload(&record, true);
+        let sig = bs58::encode(signing.sign(&payload).to_bytes()).into_string();
+        guard.submit_verdict(staged.request_id, true, sig);
+        assert_eq!(guard.get_request(staged.request_id).expect("paying").status, PAYING);
+        guard.settle_payout(staged.request_id, false);
+        let view = guard.get_purpose_ref("invoice-114".to_string()).expect("ref");
+        assert_eq!(view.committed_yocto, U128::from(0));
+        assert_eq!(view.remaining_yocto, U128::from(50 * ONE_NEAR));
     }
 
     #[test]

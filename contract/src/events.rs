@@ -107,11 +107,17 @@ pub(crate) fn log_verifier_set(public_key_base58: Option<&str>) {
     emit("verifier_set", &data);
 }
 
-pub(crate) fn log_purpose_ref_registered(ref_id: &str, vendor: &str, max_amount_yocto: U128) {
+pub(crate) fn log_purpose_ref_registered(
+    ref_id: &str,
+    vendor: &str,
+    payee: &AccountId,
+    max_amount_yocto: U128,
+) {
     let data = format!(
-        "{{\"ref_id\":\"{}\",\"vendor\":\"{}\",\"max_amount_yocto\":\"{}\"}}",
+        "{{\"ref_id\":\"{}\",\"vendor\":\"{}\",\"payee\":\"{}\",\"max_amount_yocto\":\"{}\"}}",
         escape_json(ref_id),
         escape_json(vendor),
+        escape_json(payee.as_str()),
         max_amount_yocto.0
     );
     emit("purpose_ref_registered", &data);
