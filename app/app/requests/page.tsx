@@ -4,9 +4,12 @@ import { getMergedRequests } from "../../lib/supabase";
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-// Server-rendered request feed: every merged request with purpose chip,
-// status, reason, and attestation badge, so every probe string is in the
-// first HTML byte stream with zero client JS.
+// Server-rendered request feed (issue #63 sample-data honesty): every
+// merged request with purpose, status, reason, attestation badge, and an
+// explicit `source`. Fixture and stub rows render a visible `sample data`
+// tag and never render `TEE-verified` (only backed chain/mirror rows do),
+// so every probe string is in the first HTML byte stream with zero
+// client JS.
 export default async function RequestsPage() {
   const requests = await getMergedRequests();
   return (
@@ -32,7 +35,14 @@ export default async function RequestsPage() {
               <td>{row.status}</td>
               <td>{typeof row.reason === "string" ? row.reason : ""}</td>
               <td>
-                <Badge badge={row.badge} requestId={row.request_id} />
+                <Badge
+                  badge={row.badge}
+                  requestId={row.request_id}
+                  source={row.source}
+                />
+                {row.source !== "chain" && row.source !== "mirror" ? (
+                  <span>sample data</span>
+                ) : null}
               </td>
             </tr>
           ))}
