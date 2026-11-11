@@ -2,7 +2,7 @@
 // Attack suite: builds/starts the real app and asserts the live HTTP gates
 // (health, fleet, requests, queue, receipts, CSV export) plus the guard
 // contract unit tests on every run — then, when testnet credentials are
-// present, fires 3 blocked attacks plus 1 clean transit against the guard
+// present, fires the blocked attacks plus clean transits against the guard
 // and prints per-gate pass/fail. Fixture verdicts are signed with the
 // local suite Ed25519 key registered by scripts/fixtures.mjs — an operator
 // fixture, never a TEE attestation (live judgment stays
@@ -12,6 +12,7 @@
 // NEAR_PRIVATE_KEY. Without credentials the chain gates print SKIP and the
 // suite exits 0 when the offline gates pass.
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -26,12 +27,17 @@ import {
 import {
   APP_GATE_PAGES,
   GATE_DEFS,
+  MEMO_FILTER_OBJECTION,
+  MEMO_MISMATCH_OBJECTION,
   RECEIPTS_CSV_HEADER,
   RECEIPTS_CSV_HEADER_PREFIX,
   SUITE_DEFAULTS,
   buildVerdictPayload,
+  canonicalEvidence,
+  containsJudgeInstructions,
   createPurposeRefLedger,
   evaluatePurposeRefRequest,
+  fixtureJudgeWordOverlap,
   formatGateLine,
   resolveGuardId,
   txHashOf,
@@ -220,6 +226,76 @@ function runOfflinePurposeRefGates() {
       throw new Error(`Offline gate same-invoice-twice failed: got ${second.status}/${second.reason ?? null}.`);
     }
     console.log(`GATE same-invoice-twice: PASS reason=${second.reason} remaining=20000000000000000000000000`);
+  }
+}
+
+function sha256Hex(text) {
+  return createHash("sha256").update(text, "utf8").digest("hex");
+}
+
+// Fixture evidence bundle (issue #64): the same 9-key canonical shape
+// the verifier binds, with `"fixture": true` and empty chat fields —
+// the suite signs fixture verdicts directly instead of judging.
+function fixtureEvidenceHex() {
+  return sha256Hex(canonicalEvidence({
+    chat_id: "",
+    filtered: false,
+    fixture: true,
+    model: "fixture-model",
+    preflight_nonce: "",
+    request_sha256: "",
+    response_sha256: "",
+    signature: "",
+    signing_address: "",
+  }));
+}
+
+// Offline reason-judge gates (issue #64, no network): the deterministic
+// checks pass on the pure ledger replay, then the fixture judge rules —
+// reported per mode in the same PASS idiom as the purpose-ref gates.
+function runOfflineJudgeGates() {
+  const NEAR = 10n ** 24n;
+  // Gate reason-mismatch: right payee, open ref, within caps — but the
+  // memo shares no word with the invoice description, so the fixture
+  // judge holds it with an objection.
+  {
+    const ledger = createPurposeRefLedger({
+      refId: "invoice-114",
+      vendor: "CoreWeave",
+      payee: "a.near",
+      maxYocto: (50n * NEAR).toString(),
+    });
+    const deterministic = evaluatePurposeRefRequest(ledger, {
+      payee: "a.near",
+      vendor: "CoreWeave",
+      amountYocto: (5n * NEAR).toString(),
+    });
+    if (deterministic.status !== "staged") {
+      throw new Error(`Offline gate reason-mismatch setup failed: deterministic is ${deterministic.status}.`);
+    }
+    const judged = fixtureJudgeWordOverlap(
+      SUITE_DEFAULTS.mismatchMemo,
+      SUITE_DEFAULTS.mismatchDescription,
+    );
+    if (judged.consistent !== false || judged.objection !== MEMO_MISMATCH_OBJECTION) {
+      throw new Error(`Offline gate reason-mismatch failed: got consistent=${judged.consistent}.`);
+    }
+    console.log(
+      `GATE reason-mismatch: HELD objection=${judged.objection} ` +
+      `memo=${JSON.stringify(SUITE_DEFAULTS.mismatchMemo)} ` +
+      `description=${JSON.stringify(SUITE_DEFAULTS.mismatchDescription)} mode=offline PASS`,
+    );
+  }
+  // Gate memo-instructions: the deterministic filter holds the memo
+  // before any model call.
+  {
+    if (!containsJudgeInstructions(SUITE_DEFAULTS.filterMemo)) {
+      throw new Error("Offline gate memo-instructions failed: the filter passed the memo.");
+    }
+    console.log(
+      `GATE memo-instructions: HELD objection=${MEMO_FILTER_OBJECTION} ` +
+      `memo=${JSON.stringify(SUITE_DEFAULTS.filterMemo)} mode=offline PASS`,
+    );
   }
 }
 
@@ -431,8 +507,10 @@ async function main() {
 
   // Purpose-ref offline gates run on every invocation (no network):
   // both print PASS with their reason codes even without credentials.
+  // The reason-judge offline gates run alongside them, reported per mode.
   try {
     runOfflinePurposeRefGates();
+    runOfflineJudgeGates();
   } catch (err) {
     console.error(err.message ?? String(err));
     process.exit(1);
@@ -521,7 +599,7 @@ async function main() {
   const agent = new Account(agentId, provider, KeyPair.fromString(stored.agentPrivateKey));
   const owner = new Account(signerId, provider, KeyPair.fromString(signerKey));
 
-  async function requestAsAgent(payee, amountNear, vendor, purposeRef = SUITE_DEFAULTS.purposeRef) {
+  async function requestAsAgent(payee, amountNear, vendor, purposeRef = SUITE_DEFAULTS.purposeRef, memo = SUITE_DEFAULTS.mismatchDescription) {
     const outcome = await agent.callFunctionRaw({
       contractId: guardId,
       methodName: "request_payment",
@@ -530,13 +608,14 @@ async function main() {
         amount_yocto: nearToYoctoString(amountNear, "amount"),
         purpose_ref: purposeRef,
         vendor,
+        memo,
       },
       gas: CALL_GAS,
     });
     return { tx: txHashOf(outcome), result: getTransactionLastResult(outcome) };
   }
 
-  async function registerEphemeralRef(refId, vendor, payee, maxNear) {
+  async function registerEphemeralRef(refId, vendor, payee, maxNear, description = SUITE_DEFAULTS.mismatchDescription) {
     const outcome = await owner.callFunctionRaw({
       contractId: guardId,
       methodName: "register_purpose_ref",
@@ -545,6 +624,7 @@ async function main() {
         vendor,
         payee,
         max_amount_yocto: nearToYoctoString(maxNear, "max"),
+        description,
       },
       gas: CALL_GAS,
     });
@@ -559,15 +639,20 @@ async function main() {
         `Gate setup failed: request ${requestId} is ${record.status}, expected staged.`,
       );
     }
-    const payload = buildVerdictPayload(record, consistent);
+    const evidenceSha256 = fixtureEvidenceHex();
+    const payload = buildVerdictPayload(record, consistent, {
+      contractId: guardId,
+      evidenceSha256,
+      memoSha256: sha256Hex(record.memo ?? ""),
+    });
     const signatureBase58 = signWithSuiteKey(payload, suiteKey);
     const outcome = await owner.callFunctionRaw({
       contractId: guardId,
       methodName: "submit_verdict",
-      args: { request_id: requestId, consistent, signature_base58: signatureBase58 },
+      args: { request_id: requestId, consistent, evidence_sha256: evidenceSha256, signature_base58: signatureBase58 },
       gas: CALL_GAS,
     });
-    return { verdictTx: txHashOf(outcome), signatureBase58 };
+    return { verdictTx: txHashOf(outcome), signatureBase58, evidenceSha256 };
   }
 
   const attestationExtra = (signatureBase58) =>
@@ -742,6 +827,100 @@ async function main() {
       }
       console.log(
         `${formatGateLine(def, { requestId, tx })} reason=ExceedsPurposeRefRemaining PASS`,
+      );
+    }
+
+    // Gate 7 (issue #64): purpose mismatch with every deterministic check
+    // passing — right payee, open ref, within caps — but the memo shares
+    // no word with the invoice description, so the verdict holds it.
+    // Ephemeral ref isolates the gate from seeded book state.
+    {
+      const def = GATE_DEFS.find((gate) => gate.key === "reason-mismatch");
+      const reasonRefId = `suite-reason-${runTag}`;
+      await registerEphemeralRef(
+        reasonRefId,
+        SUITE_DEFAULTS.cleanVendor,
+        goodPayee,
+        "30",
+        SUITE_DEFAULTS.mismatchDescription,
+      );
+      console.log(`fixture ephemeral ref: ${reasonRefId} vendor=${SUITE_DEFAULTS.cleanVendor} payee=${goodPayee} description=${JSON.stringify(SUITE_DEFAULTS.mismatchDescription)}`);
+      const { tx, result } = await requestAsAgent(
+        goodPayee,
+        SUITE_DEFAULTS.stagedNear,
+        SUITE_DEFAULTS.cleanVendor,
+        reasonRefId,
+        SUITE_DEFAULTS.mismatchMemo,
+      );
+      const requestId = assertRequestId(result?.request_id);
+      const stagedReq = await getRequest(provider, guardId, requestId);
+      if (stagedReq.status !== "staged") {
+        throw new Error(`Gate reason-mismatch setup failed: request ${requestId} is ${stagedReq.status}.`);
+      }
+      const { verdictTx, signatureBase58 } = await submitFixtureVerdict(requestId, false);
+      const storedReq = await waitForRequestStatus(
+        (id) => getRequest(provider, guardId, id),
+        requestId,
+        ["held"],
+      );
+      if (storedReq.status !== "held") {
+        throw new Error(`Gate reason-mismatch failed: request ${requestId} is ${storedReq.status}.`);
+      }
+      console.log(
+        `${formatGateLine(def, {
+          requestId,
+          tx,
+          verdictTx,
+          extra: `${attestationExtra(signatureBase58)} objection=${MEMO_MISMATCH_OBJECTION} memo=${JSON.stringify(SUITE_DEFAULTS.mismatchMemo)} mode=live`,
+        })} PASS`,
+      );
+    }
+
+    // Gate 8 (issue #64): instructions in the memo — the deterministic
+    // filter holds it before any model call, so the fixture verdict is
+    // inconsistent even though every deterministic check passes.
+    {
+      const def = GATE_DEFS.find((gate) => gate.key === "memo-instructions");
+      const filterRefId = `suite-filter-${runTag}`;
+      await registerEphemeralRef(
+        filterRefId,
+        SUITE_DEFAULTS.cleanVendor,
+        goodPayee,
+        "30",
+        SUITE_DEFAULTS.mismatchDescription,
+      );
+      console.log(`fixture ephemeral ref: ${filterRefId} vendor=${SUITE_DEFAULTS.cleanVendor} payee=${goodPayee}`);
+      const { tx, result } = await requestAsAgent(
+        goodPayee,
+        SUITE_DEFAULTS.stagedNear,
+        SUITE_DEFAULTS.cleanVendor,
+        filterRefId,
+        SUITE_DEFAULTS.filterMemo,
+      );
+      const requestId = assertRequestId(result?.request_id);
+      const stagedReq = await getRequest(provider, guardId, requestId);
+      if (stagedReq.status !== "staged") {
+        throw new Error(`Gate memo-instructions setup failed: request ${requestId} is ${stagedReq.status}.`);
+      }
+      if (!containsJudgeInstructions(SUITE_DEFAULTS.filterMemo)) {
+        throw new Error("Gate memo-instructions failed: the filter passed the memo.");
+      }
+      const { verdictTx, signatureBase58 } = await submitFixtureVerdict(requestId, false);
+      const storedReq = await waitForRequestStatus(
+        (id) => getRequest(provider, guardId, id),
+        requestId,
+        ["held"],
+      );
+      if (storedReq.status !== "held") {
+        throw new Error(`Gate memo-instructions failed: request ${requestId} is ${storedReq.status}.`);
+      }
+      console.log(
+        `${formatGateLine(def, {
+          requestId,
+          tx,
+          verdictTx,
+          extra: `${attestationExtra(signatureBase58)} objection=${MEMO_FILTER_OBJECTION} mode=live`,
+        })} PASS`,
       );
     }
   } catch (err) {

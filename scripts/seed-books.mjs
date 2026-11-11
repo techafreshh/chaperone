@@ -74,7 +74,8 @@ function loadBooks() {
       typeof entry?.vendor !== "string" ||
       typeof entry?.payee !== "string" ||
       entry.payee.trim() === "" ||
-      typeof entry?.cap_near !== "string"
+      typeof entry?.cap_near !== "string" ||
+      (entry.description !== undefined && typeof entry.description !== "string")
     ) {
       throw new Error(`Malformed book entry: ${JSON.stringify(entry)}`);
     }
@@ -138,6 +139,7 @@ async function main() {
           vendor: entry.vendor,
           payee,
           max_amount_yocto: maxAmountYocto,
+          description: entry.description ?? "",
         },
         gas: CALL_GAS,
       });

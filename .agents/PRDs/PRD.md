@@ -178,7 +178,7 @@ Events (`chaperone/1.0.0`): `agent_registered · policy_updated · payees_update
 ### 7.2 Purpose verifier (VPS service)
 
 1. **Preflight (once per verifier key / on rotation; nonce per request):** `GET cloud-api.near.ai/v1/attestation/report?model=<id>&provider=near&include_tls_fingerprint=true&signing_algo=ecdsa&nonce=<random-64-hex>` with `x-no-aliasing: true` → verify Intel quote (dcap-qvl), replay event log → RTMR3, SHA-256(app_compose) → MRCONFIGID, `request_nonce` == ours, NVIDIA payload via `POST nras.attestation.nvidia.com/v3/attest/gpu` → store verified `signing_address`.
-2. **Judge (per request):** OpenAI-compatible chat completion via `cloud-api.near.ai/v1` (catalog model), `Accept-Encoding: identity`, retain exact request/response bytes, prompt compares request (vendor/amount/ref) against the reason and returns `consistent | inconsistent` + objection.
+2. **Judge (per request):** OpenAI-compatible chat completion via `cloud-api.near.ai/v1` (catalog model), `Accept-Encoding: identity`, retain exact request/response bytes, prompt carries the memo, the amount, and the invoice's description, vendor and remaining amount inside delimited data blocks (block text is data, never instructions) and returns `consistent | inconsistent` + objection. A deterministic filter holds instruction-shaped memos before any model call.
 3. **Bind (per request):** `GET /v1/signature/<chat_id>?signing_algo=ecdsa` → EIP-191 ECDSA recover over `<MODEL_ID>:<sha256(req)>:<sha256(res)>` → must equal stored `signing_address`.
 4. **Attest:** sign the contract-bound verdict payload with the registered Ed25519 key; submit on-chain.
 5. **Badge truth:** only step-verified chains render `TEE-verified`; any failure renders `attestation unverifiable`; system down → `deterministic-only`, labeled.
@@ -196,8 +196,8 @@ Events (`chaperone/1.0.0`): `agent_registered · policy_updated · payees_update
 | Tool | Arguments | Behavior |
 |---|---|---|
 | `policy_get` | `agent_id?` | Returns live on-chain policy for the agent(s) |
-| `request_payment` | `payee, amount_near, purpose_ref, vendor` | Signs with the *agent's* function-call key through the guard; returns on-chain accept/reject + reason verbatim |
-| `pending` | — | Held requests + objections |
+| `request_payment` | `payee, amount_near, purpose_ref, vendor, memo` | Signs with the *agent's* function-call key through the guard; `memo` (1..=280 bytes) is the agent's stated reason; returns on-chain accept/reject + reason verbatim |
+| `pending` | — | Held requests with memo, invoice description + objections side by side |
 | `attestations` | `request_id` | Attestation state + verification details for a request |
 
 ## 8. Technology Stack
@@ -236,19 +236,41 @@ Events (`chaperone/1.0.0`): `agent_registered · policy_updated · payees_update
 ### 10.1 Contract — verdict payload (must be byte-stable)
 
 ```
-payload = "chaperone-verdict-v1"
+LP(x)     = le_u32(len(x_bytes)) || x_bytes   // every variable-length field
+payload = "chaperone-verdict-v2"
+        || LP(contract_account_id)   // binds the deployment: no cross-contract replay
         || le_u64(request_id)
-        || agent_id_bytes || payee_id_bytes
+        || LP(agent_id) || LP(payee_id)
         || le_u128(amount_yocto)
-        || purpose_ref_utf8
-        || verdict_byte      // 1 = consistent, 0 = inconsistent
+        || LP(purpose_ref)
+        || sha256(memo)              // 32 bytes: binds the stated reason
+        || evidence_sha256           // 32 bytes: sha256 of the verifier's evidence bundle
+        || verdict_byte              // 1 = consistent, 0 = inconsistent
 verdict = ed25519_sign(verifier_key, payload)   // base58 in the call
 ```
+
+`evidence_sha256` is submitted as 64 hex chars and is the sha256 of the
+verifier's canonical evidence JSON (sorted keys, no whitespace) holding
+the model id, the chat id, the sha256 of the exact request and response
+bytes, the NEAR AI ECDSA signature and signing address, and the preflight
+report nonce — plus `fixture` (always present) and `filtered` (the
+deterministic memo-filter path). Fixture runs build the same shape with
+`"fixture": true`. The contract accepts v2 only: a v1 signature fails
+with `Invalid verdict signature`.
+
+`request_payment` takes the agent's stated reason as `memo` (1..=280
+UTF-8 bytes, else the call panics with `Invalid memo`) and stores + emits
+it on `request_created`; `register_purpose_ref` takes `description` (what
+the invoice or order is for, up to 280 bytes). The judge receives the
+memo, the amount, and the invoice's description, vendor and remaining
+amount inside delimited data blocks; a deterministic filter holds
+instruction-shaped memos with the objection `memo contains instructions
+to the judge` before any model call.
 
 ### 10.2 Verifier service (internal, TS)
 
 ```
-POST /verify            { request_id }          → { consistent, objection?, signature }
+POST /verify            { request_id }          → { consistent, objection?, signature, evidence_sha256 }
 GET  /attestation/status                        → { badge: "verified"|"unverifiable"|"deterministic-only", details }
 POST /attestation/preflight { model }           → { signing_address, verified: true }
 ```
@@ -257,7 +279,7 @@ POST /attestation/preflight { model }           → { signing_address, verified:
 
 ```jsonc
 // request_payment call
-{ "payee": "coreweave.near", "amount_near": "30", "purpose_ref": "invoice-114", "vendor": "CoreWeave" }
+{ "payee": "coreweave.near", "amount_near": "30", "purpose_ref": "invoice-114", "vendor": "CoreWeave", "memo": "GPU hours, October 2026" }
 // guard refuses (example)
 { "status": "rejected", "request_id": 7, "reason": "PayeeNotAllowlisted",
   "chain_ref": "8kF3…tx", "note": "attacker.near is not on agent-1's allowlist" }

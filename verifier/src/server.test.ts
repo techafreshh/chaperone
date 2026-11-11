@@ -322,6 +322,10 @@ describe("createVerifyHandler local fixture path", () => {
       calls += 1;
       throw new Error("model must not be called");
     }) as unknown as typeof fetch;
+    // Even with a live key configured (HTTP judge path armed), the
+    // deterministic filter holds before any fetch: the mocked model
+    // records zero calls.
+    process.env.NEAR_AI_API_KEY = "test-key";
     const keys = resolveVerifierKeys();
     const inner = new InMemoryChain({
       verifierPublicKey: keys.publicKeyBytes,
