@@ -36,6 +36,7 @@ export default async function RequestsPage() {
               <th>Reason</th>
               <th>Chain tx</th>
               <th>Badge</th>
+              <th>Evidence</th>
             </tr>
           </thead>
           <tbody>
@@ -90,6 +91,14 @@ export default async function RequestsPage() {
                         sample data
                       </span>
                     ) : null}
+                  </td>
+                  <td>
+                    <a
+                      href={`/api/evidence/${row.request_id}`}
+                      data-testid={`evidence-${row.request_id}`}
+                    >
+                      evidence
+                    </a>
                   </td>
                 </tr>
               );

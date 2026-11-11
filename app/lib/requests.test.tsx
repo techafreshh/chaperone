@@ -396,4 +396,25 @@ describe("requests page probe strings (issue #63)", () => {
       if (savedStub !== undefined) process.env[REQUESTS_STUB_FILE] = savedStub;
     }
   });
+
+  it("links every row to its re-checkable evidence bundle (issue #66)", async () => {
+    const savedUrl = process.env.SUPABASE_URL;
+    const savedKey = process.env.SUPABASE_SERVICE_KEY;
+    const savedStub = process.env[REQUESTS_STUB_FILE];
+    delete process.env.SUPABASE_URL;
+    delete process.env.SUPABASE_SERVICE_KEY;
+    delete process.env[REQUESTS_STUB_FILE];
+    try {
+      const html = renderToStaticMarkup(await RequestsPage());
+      expect(html).toContain("Evidence");
+      for (const id of [3, 2, 1]) {
+        expect(html).toContain(`href="/api/evidence/${id}"`);
+        expect(html).toContain(`evidence-${id}`);
+      }
+    } finally {
+      if (savedUrl !== undefined) process.env.SUPABASE_URL = savedUrl;
+      if (savedKey !== undefined) process.env.SUPABASE_SERVICE_KEY = savedKey;
+      if (savedStub !== undefined) process.env[REQUESTS_STUB_FILE] = savedStub;
+    }
+  });
 });
