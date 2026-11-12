@@ -148,6 +148,15 @@ pub(crate) fn log_funds_withdrawn(to: &AccountId, amount_yocto: u128) {
     emit("funds_withdrawn", &data);
 }
 
+pub(crate) fn log_funds_withdraw_failed(to: &AccountId, amount_yocto: u128) {
+    let data = format!(
+        "{{\"to\":\"{}\",\"amount_yocto\":\"{}\"}}",
+        escape_json(to.as_str()),
+        amount_yocto
+    );
+    emit("funds_withdraw_failed", &data);
+}
+
 pub(crate) fn log_request_created(request: &PaymentRequest) {
     let data = format!(
         "{{\"request_id\":{},\"agent_id\":\"{}\",\"payee\":\"{}\",\"amount_yocto\":\"{}\",\"purpose_ref\":\"{}\",\"vendor\":\"{}\",\"memo\":\"{}\"}}",
