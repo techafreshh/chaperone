@@ -16,7 +16,7 @@ mod request;
 mod verifier;
 
 use books::{log_purpose_ref_closed, log_purpose_ref_registered, PurposeRef, PurposeRefView};
-use events::{log_agent_registered, log_funds_deposited, log_funds_withdrawn, log_policy_updated};
+use events::{log_agent_registered, log_funds_deposited, log_funds_withdraw_failed, log_funds_withdrawn, log_policy_updated};
 use policy::{
     current_utc_day, effective_spent, log_agent_killed, log_agent_reenabled, log_payees_updated,
     refresh_day, AgentPolicy, AgentView,
@@ -767,18 +767,55 @@ impl Guard {
         log_funds_deposited(&env::predecessor_account_id(), amount);
     }
 
-    /// Owner-only withdrawal of treasury leftovers. State is decremented
-    /// before the transfer promise is built; no callback reconciliation
-    /// (deferred per the payment-request plan).
+    /// Owner-only withdrawal of treasury leftovers. The amount is
+    /// debited before the transfer promise is built (reserving it
+    /// against concurrent withdraws), then the transfer plus the
+    /// private `on_withdraw` settlement callback is scheduled. Success
+    /// emits `funds_withdrawn`; failure refunds the debit and emits
+    /// `funds_withdraw_failed`.
     pub fn withdraw_fleet_funds(&mut self, to: AccountId, amount: U128) -> Promise {
         self.assert_owner();
         require!(
             amount.0 <= self.treasury_yocto,
             "Insufficient treasury balance"
         );
-        self.treasury_yocto -= amount.0;
-        log_funds_withdrawn(&to, amount.0);
-        Promise::new(to).transfer(NearToken::from_yoctonear(amount.0))
+        self.treasury_yocto = self.treasury_yocto.saturating_sub(amount.0);
+        Promise::new(to.clone())
+            .transfer(NearToken::from_yoctonear(amount.0))
+            .then(
+                Promise::new(env::current_account_id()).function_call(
+                    "on_withdraw".to_string(),
+                    format!("{{\"to\":\"{}\",\"amount\":\"{}\"}}", to.as_str(), amount.0).into_bytes(),
+                    NearToken::from_yoctonear(0),
+                    Gas::from_tgas(10),
+                ),
+            )
+    }
+
+    /// Private settlement callback for a withdraw transfer: the transfer
+    /// receipt is promise 0. Success emits `funds_withdrawn`; failure
+    /// refunds the treasury debit and emits `funds_withdraw_failed`.
+    #[private]
+    pub fn on_withdraw(&mut self, to: AccountId, amount: U128) {
+        // Bounded read: a transfer receipt succeeds with empty data, so
+        // `max_len` 0 accepts exactly that and rejects anything longer.
+        let succeeded = env::promise_result_checked(0, 0).is_ok();
+        self.settle_withdraw(&to, amount.0, succeeded);
+    }
+
+    /// Shared settlement core so unit tests can cover both branches
+    /// without executing promises (the host mock cannot produce a
+    /// transfer result; the balance assertions belong in the sandbox
+    /// round trip instead). Success keeps the debit and emits
+    /// `funds_withdrawn`; failure restores the debit via
+    /// `saturating_add` and emits `funds_withdraw_failed`.
+    fn settle_withdraw(&mut self, to: &AccountId, amount: u128, succeeded: bool) {
+        if succeeded {
+            log_funds_withdrawn(to, amount);
+        } else {
+            self.treasury_yocto = self.treasury_yocto.saturating_add(amount);
+            log_funds_withdraw_failed(to, amount);
+        }
     }
 
     /// Logical treasury balance (sum of `deposit_fleet_funds` minus
@@ -1015,6 +1052,50 @@ mod tests {
         set_predecessor(OWNER);
         let _ = guard.withdraw_fleet_funds("owner.testnet".parse().unwrap(), U128::from(ONE_NEAR));
         assert_eq!(guard.treasury(), U128::from(FIVE_NEAR - ONE_NEAR));
+    }
+
+    #[test]
+    fn settle_withdraw_success_keeps_treasury_debited() {
+        let mut guard = fresh_guard();
+        deposit_as("anyone.near", FIVE_NEAR);
+        guard.deposit_fleet_funds();
+
+        set_predecessor(OWNER);
+        let to: AccountId = "owner.testnet".parse().unwrap();
+        let _ = guard.withdraw_fleet_funds(to.clone(), U128::from(ONE_NEAR));
+        assert_eq!(guard.treasury(), U128::from(FIVE_NEAR - ONE_NEAR));
+        guard.settle_withdraw(&to, ONE_NEAR, true);
+        assert_eq!(guard.treasury(), U128::from(FIVE_NEAR - ONE_NEAR));
+    }
+
+    #[test]
+    fn settle_withdraw_failure_restores_treasury() {
+        let mut guard = fresh_guard();
+        deposit_as("anyone.near", FIVE_NEAR);
+        guard.deposit_fleet_funds();
+
+        set_predecessor(OWNER);
+        let to: AccountId = "ghost.testnet".parse().unwrap();
+        let _ = guard.withdraw_fleet_funds(to.clone(), U128::from(ONE_NEAR));
+        assert_eq!(guard.treasury(), U128::from(FIVE_NEAR - ONE_NEAR));
+        guard.settle_withdraw(&to, ONE_NEAR, false);
+        assert_eq!(guard.treasury(), U128::from(FIVE_NEAR));
+    }
+
+    #[test]
+    fn settle_withdraw_success_leaves_no_double_debit() {
+        let mut guard = fresh_guard();
+        deposit_as("anyone.near", FIVE_NEAR);
+        guard.deposit_fleet_funds();
+
+        set_predecessor(OWNER);
+        let to: AccountId = "owner.testnet".parse().unwrap();
+        let _ = guard.withdraw_fleet_funds(to.clone(), U128::from(ONE_NEAR));
+        guard.settle_withdraw(&to, ONE_NEAR, true);
+        // The remaining balance is still withdrawable in full: the
+        // success path debited exactly once.
+        let _ = guard.withdraw_fleet_funds(to.clone(), U128::from(FIVE_NEAR - ONE_NEAR));
+        assert_eq!(guard.treasury(), U128::from(0));
     }
 
     #[test]
